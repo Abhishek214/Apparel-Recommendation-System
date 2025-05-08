@@ -15,249 +15,385 @@ Based on our evaluation, we found that the best-performing recommendation models
 6.IDF
 
 7.CNN
-""Plot class distribution from dataset"""
-class_counts = dataset.dataset.class_counts
 
-plt.figure(figsize=(12, 6))
-bars = plt.bar(class_counts.keys(), class_counts.values())
-
-# Add count labels on top of bars
-for bar in bars:
-height = bar.get_height()
-plt.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-f'{height:.0f}', ha='center', va='bottom')
-
-plt.xlabel('Class')
-plt.ylabel('Count')
-plt.title(title)
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig(f"{title.lower().replace(' ', '_')}.png")
-plt.close()
-
-def florence2_inference_results(model, processor, dataset, num_samples=3,
-output_dir="inference_results"):
-"""Run inference on Florence 2 model and visualize results"""
-# Create output directory
-os.makedirs(output_dir, exist_ok=True)
-
-# Ensure model is in eval mode
-model.eval()
-
-# Get the actual model if wrapped in DataParallel or DDP
-if hasattr(model, 'module'):
-model_to_use = model.module
-else:
-model_to_use = model
-
-# Get random sample indices
-indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
-
-results = []
-for i in indices:
-prefix, suffix, image = dataset[i]
-
-# Convert PIL image to tensor if needed
-if not isinstance(image, torch.Tensor):
-image_tensor = transforms.ToTensor()(image)
-else:
-image_tensor = image
-
-# Ensure 3 channels
-if image_tensor.shape[0] == 1:
-image_tensor = image_tensor.repeat(3, 1, 1)
-
-with torch.no_grad():
-# Prepare inputs
-inputs = processor(text=prefix, images=image_tensor.unsqueeze(0),
-return_tensors="pt").to(model_to_use.device)
-
-# Generate prediction
-generated_ids = model_to_use.generate(
-input_ids=inputs["input_ids"],
-pixel_values=inputs["pixel_values"],
-max_new_tokens=1024,
-early_stopping=False,
-do_sample=False,
-num_beams=3,
+Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("training.log"),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger(__name__)
 
-generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
 
-# Parse the generated output
-try:
-parsed_answer = processor.post_process_generation(
-generated_text,
-task='<OD>',
-image_size=(image.width, image.height))
+            if scheduler is not None:
+                scheduler.step()
 
-# Access bounding boxes and labels
-od_results = parsed_answer.get('<OD>', {})
-bboxes = od_results.get('bboxes', [])
-labels = od_results.get('labels', [])
+            optimizer.zero_grad()
 
-# Save visualization
-save_path = os.path.join(output_dir, f"inference_sample_{i}.png")
-plot_bboxes_on_image(image, bboxes, labels, save_path)
+            # Track loss
+            train_loss += loss.item() * gradient_accumulation_steps
+            train_steps += 1
 
-results.append({
-'sample_idx': i,
-'prefix': prefix,
-'bboxes': bboxes,
-'labels': labels,
-'image_path': save_path
-})
+            # Update progress bar
+            pbar.set_postfix({'loss': loss.item()})
+            
+            # Log at specified intervals
+            if (batch_idx + 1) % (log_interval * gradient_accumulation_steps) == 0:
+                logger.info(f"Epoch: {epoch+1}/{start_epoch+epochs}, Batch: {batch_idx+1}/{len(train_loader)}, "
+                           f"Loss: {loss.item():.6f}, LR: {optimizer.param_groups[0]['lr']:.8f}")
 
-logger.info(f"Processed inference sample {i} with {len(bboxes)} detections")
-except Exception as e:
-logger.error(f"Error processing inference for sample {i}: {str(e)}")
+        # End of epoch
+        avg_train_loss = train_loss / max(train_steps, 1)
+        train_losses.append(avg_train_loss)
+        epoch_time = time.time() - epoch_start_time
+        logger.info(f"Epoch {epoch+1} completed in {epoch_time:.2f}s. Avg Training Loss: {avg_train_loss:.6f}")
 
-return results
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        val_steps = 0
 
-# Main training function with multi-GPU support
-def train_model(model, processor, train_loader, val_loader,
-optimizer, scheduler=None, epochs=20,
-gradient_accumulation_steps=2,
-patience=5, log_interval=10,
-checkpoint_dir="./model_checkpoints",
-save_epoch_interval=1,
-visualize_samples=4,
-continue_from_checkpoint=True):
-"""Training function with multi-GPU support, mixed precision, and early stopping"""
+        # Progress bar for validation
+        val_pbar = tqdm(enumerate(val_loader), total=len(val_loader),
+                        desc=f"Validation Epoch {epoch+1}/{start_epoch+epochs}")
 
-# Create checkpoint directory
-os.makedirs(checkpoint_dir, exist_ok=True)
+        with torch.no_grad():
+            for batch_idx, (inputs, answers) in val_pbar:
+                # Skip empty batches
+                if any(tensor.numel() == 0 for tensor in inputs.values() if isinstance(tensor, torch.Tensor)):
+                    continue
 
-# Initialize mixed precision training if available
-scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+                # Prepare labels
+                try:
+                    labels = processor.tokenizer(
+                        text=answers,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=512
+                    ).input_ids.to(DEVICE)
+                except Exception as e:
+                    logger.error(f"Error processing validation labels for batch {batch_idx}: {str(e)}")
+                    continue
 
-# Initialize tracking variables
-best_val_loss = float('inf')
-early_stop_counter = 0
-start_epoch = 0
-train_losses = []
-val_losses = []
+                # Forward pass
+                outputs = model(
+                    input_ids=inputs["input_ids"],
+                    pixel_values=inputs["pixel_values"],
+                    labels=labels
+                )
 
-# Load checkpoint if available and requested
-if continue_from_checkpoint:
-# Try loading best model checkpoint
-best_model_path = os.path.join(checkpoint_dir, "best_model.pt")
-if os.path.exists(best_model_path):
-logger.info(f"Loading checkpoint from {best_model_path}")
-try:
-checkpoint = torch.load(best_model_path, map_location=DEVICE)
+                loss = outputs.loss
+                if loss.dim() > 0:
+                    loss = loss.mean()
 
-# Get the right model (unwrap DataParallel/DDP if needed)
-model_to_load = model.module if hasattr(model, 'module') else model
-model_to_load.load_state_dict(checkpoint['model_state_dict'])
+                if not (torch.isnan(loss) or torch.isinf(loss)):
+                    val_loss += loss.item()
+                    val_steps += 1
 
-optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-start_epoch = checkpoint['epoch'] + 1
-best_val_loss = checkpoint['val_loss']
+                # Update progress bar
+                val_pbar.set_postfix({'val_loss': loss.item()})
 
-# Load training history if available
-if 'train_losses' in checkpoint:
-train_losses = checkpoint['train_losses']
-if 'val_losses' in checkpoint:
-val_losses = checkpoint['val_losses']
+        # Calculate average validation loss
+        avg_val_loss = val_loss / max(val_steps, 1)
+        val_losses.append(avg_val_loss)
+        logger.info(f"Validation Loss: {avg_val_loss:.6f}")
 
-logger.info(f"Resuming from epoch {start_epoch} with validation loss {best_val_loss:.6f}")
-except Exception as e:
-logger.error(f"Error loading checkpoint: {str(e)}")
-logger.info("Starting training from scratch")
-else:
-logger.info("No checkpoint found, starting training from scratch")
+        # Run inference on some validation samples
+        if visualize_samples > 0 and (epoch + 1) % save_epoch_interval == 0:
+            inference_dir = os.path.join(checkpoint_dir, f"epoch_{epoch+1}_inferences")
+            florence2_inference_results(model, processor, val_loader.dataset, 
+                                       num_samples=visualize_samples, 
+                                       output_dir=inference_dir)
 
-# Main training loop
-for epoch in range(start_epoch, start_epoch + epochs):
-epoch_start_time = time.time()
+        # Save checkpoint
+        if (epoch + 1) % save_epoch_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
+            
+            # Get model state dict, accounting for DDP
+            if hasattr(model, 'module'):
+                model_state_dict = model.module.state_dict()
+            else:
+                model_state_dict = model.state_dict()
+            
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model_state_dict,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'train_losses': train_losses,
+                'val_losses': val_losses
+            }, checkpoint_path)
+            
+            logger.info(f"Checkpoint saved to {checkpoint_path}")
 
-# Training phase
-model.train()
-train_loss = 0
-train_steps = 0
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            early_stop_counter = 0
+            
+            # Save best model
+            best_model_path = os.path.join(checkpoint_dir, "best_model.pt")
+            
+            # Get model state dict, accounting for DDP
+            if hasattr(model, 'module'):
+                model_state_dict = model.module.state_dict()
+            else:
+                model_state_dict = model.state_dict()
+                
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model_state_dict,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'train_losses': train_losses,
+                'val_losses': val_losses
+            }, best_model_path)
+            
+            logger.info(f"Best model saved with validation loss: {best_val_loss:.6f}")
+        else:
+            early_stop_counter += 1
+            logger.info(f"Early stopping counter: {early_stop_counter}/{patience}")
+            
+            if early_stop_counter >= patience:
+                logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                break
 
-# Progress bar for training
-pbar = tqdm(enumerate(train_loader), total=len(train_loader),
-desc=f"Epoch {epoch+1}/{start_epoch+epochs}")
+        # Plot training curves after each epoch
+        plot_training_curves(train_losses, val_losses, 
+                           save_path=os.path.join(checkpoint_dir, "training_curves.png"))
 
-# Batch processing
-for batch_idx, (inputs, answers) in pbar:
-# Skip empty batches
-if any(tensor.numel() == 0 for tensor in inputs.values() if isinstance(tensor, torch.Tensor)):
-logger.warning(f"Skipping empty batch {batch_idx}")
-continue
+    # Final evaluation and cleanup
+    logger.info(f"Training completed. Best validation loss: {best_val_loss:.6f}")
+    
+    # Return the best model path for easy loading
+    return os.path.join(checkpoint_dir, "best_model.pt")
 
-# Prepare labels
-try:
-labels = processor.tokenizer(
-text=answers,
-return_tensors="pt",
-padding=True,
-truncation=True,
-max_length=512
-).input_ids.to(DEVICE)
-except Exception as e:
-logger.error(f"Error processing labels for batch {batch_idx}: {str(e)}")
-continue
 
-# Forward pass with mixed precision
-try:
-with torch.cuda.amp.autocast() if scaler else torch.no_grad():
-outputs = model(
-input_ids=inputs["input_ids"],
-pixel_values=inputs["pixel_values"],
-labels=labels
-)
+def main():
+    """Main function to orchestrate the training process"""
+    
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description="Florence 2 fine-tuning for document layout parsing")
+    parser.add_argument("--model_size", type=str, default="base", choices=["base", "large"],
+                      help="Model size to use (base or large)")
+    parser.add_argument("--train_data", type=str, required=True, 
+                      help="Path to training data JSONL file")
+    parser.add_argument("--train_images", type=str, required=True,
+                      help="Path to training images directory")
+    parser.add_argument("--val_data", type=str, required=True,
+                      help="Path to validation data JSONL file")
+    parser.add_argument("--val_images", type=str, required=True,
+                      help="Path to validation images directory")
+    parser.add_argument("--epochs", type=int, default=20,
+                      help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=16,
+                      help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-5,
+                      help="Learning rate")
+    parser.add_argument("--checkpoint_dir", type=str, default="./model_checkpoints",
+                      help="Directory to save checkpoints")
+    parser.add_argument("--tune_hyperparams", action="store_true",
+                      help="Run hyperparameter tuning before training")
+    parser.add_argument("--continue_training", action="store_true",
+                      help="Continue from latest checkpoint")
+    parser.add_argument("--num_workers", type=int, default=4,
+                      help="Number of data loader workers")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
+                      help="Number of gradient accumulation steps")
+    
+    args = parser.parse_args()
+    
+    # Set up the model path based on size
+    model_path = MODEL_LARGE if args.model_size == "large" else MODEL_BASE
+    logger.info(f"Using model: {model_path}")
+    
+    # Initialize processor and model
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+    ).to(DEVICE)
+    
+    # Create datasets with class-aware augmentation
+    augmentation = DocumentLayoutAugmentation(rare_class_augment_factor=2.0)
+    
+    train_dataset = DetectionDataset(
+        jsonl_file_path=args.train_data,
+        image_directory_path=args.train_images,
+        transform=augmentation,
+        is_training=True
+    )
+    
+    val_dataset = DetectionDataset(
+        jsonl_file_path=args.val_data,
+        image_directory_path=args.val_images,
+        transform=None,
+        is_training=False
+    )
+    
+    # Visualize class distribution
+    plot_class_distribution(train_dataset, title="Training Class Distribution")
+    plot_class_distribution(val_dataset, title="Validation Class Distribution")
+    
+    # Configure weighted sampler for balanced training
+    if USE_DISTRIBUTED:
+        train_sampler = DistributedSampler(train_dataset)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    else:
+        weights = torch.DoubleTensor(train_dataset.class_weights)
+        train_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(train_dataset),
+            replacement=True
+        )
+        val_sampler = None
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        collate_fn=lambda batch: collate_fn(batch, processor, DEVICE),
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+        collate_fn=lambda batch: collate_fn(batch, processor, DEVICE),
+        pin_memory=True
+    )
+    
+    # Run hyperparameter tuning if requested
+    if args.tune_hyperparams:
+        logger.info("Starting hyperparameter tuning")
+        best_params = optuna_hyperparameter_search(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            processor=processor,
+            n_trials=10
+        )
+        logger.info(f"Best hyperparameters: {best_params}")
+        
+        # Update hyperparameters based on tuning results
+        lora_r = best_params.get('lora_r', 16)
+        lora_alpha = best_params.get('lora_alpha', 32)
+        lora_dropout = best_params.get('lora_dropout', 0.1)
+        batch_size = best_params.get('batch_size', args.batch_size)
+        lr = best_params.get('lr', args.lr)
+    else:
+        # Default hyperparameters
+        lora_r = 16
+        lora_alpha = 32
+        lora_dropout = 0.1
+        lr = args.lr
+    
+    # Configure LoRA
+    lora_config = LoraConfig(
+        r=lora_r,
+        lora_alpha=lora_alpha,
+        target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "linear", "lm_head"],
+        task_type="CAUSAL_LM",
+        lora_dropout=lora_dropout,
+        bias="none",
+        inference_mode=False,
+        use_rslora=True,
+        init_lora_weights="gaussian",
+    )
+    
+    # Create PEFT model
+    peft_model = get_peft_model(model, lora_config)
+    logger.info("LoRA model created")
+    
+    # Print trainable parameters
+    trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in peft_model.parameters())
+    logger.info(f"Trainable parameters: {trainable_params:,} of {all_params:,} "
+               f"({100 * trainable_params / all_params:.2f}%)")
+    
+    # Setup distributed training if multiple GPUs
+    if USE_DISTRIBUTED:
+        # Initialize process group
+        dist.init_process_group(backend="nccl")
+        peft_model = DDP(peft_model, device_ids=[torch.cuda.current_device()])
+        logger.info("Distributed training setup complete")
+    
+    # Optimizer setup
+    optimizer = AdamW(
+        peft_model.parameters(),
+        lr=lr,
+        weight_decay=0.05,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
+    
+    # Learning rate scheduler
+    num_training_steps = len(train_loader) * args.epochs
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=5,  # Restart every 5 epochs
+        T_mult=1,
+        eta_min=1e-7
+    )
+    
+    # Train the model
+    best_model_path = train_model(
+        model=peft_model,
+        processor=processor,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epochs=args.epochs,
+        patience=5,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        checkpoint_dir=args.checkpoint_dir,
+        continue_from_checkpoint=args.continue_training,
+        visualize_samples=4
+    )
+    
+    # Load best model for final evaluation
+    logger.info(f"Loading best model from {best_model_path}")
+    checkpoint = torch.load(best_model_path, map_location=DEVICE)
+    
+    if hasattr(peft_model, 'module'):
+        peft_model.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        peft_model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Save final model
+    output_dir = os.path.join(args.checkpoint_dir, "final_model")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save model and processor
+    model_to_save = peft_model.module if hasattr(peft_model, 'module') else peft_model
+    model_to_save.save_pretrained(output_dir)
+    processor.save_pretrained(output_dir)
+    
+    logger.info(f"Final model saved to {output_dir}")
+    
+    # Clean up
+    if USE_DISTRIBUTED:
+        dist.destroy_process_group()
+    
+    logger.info("Training completed successfully!")
 
-loss = outputs.loss
-if loss.dim() > 0:
-loss = loss.mean()
 
-# Scale loss by gradient accumulation steps
-loss = loss / gradient_accumulation_steps
-except RuntimeError as e:
-if "CUDA out of memory" in str(e):
-logger.error(f"CUDA OOM in batch {batch_idx}, skipping")
-# Try to free memory
-torch.cuda.empty_cache()
-continue
-else:
-logger.error(f"Error in forward pass for batch {batch_idx}: {str(e)}")
-continue
-
-# Check if loss is valid
-if torch.isnan(loss) or torch.isinf(loss):
-logger.warning(f"Invalid loss value: {loss.item()} in batch {batch_idx}, skipping")
-continue
-
-# Backward pass with mixed precision
-if scaler:
-scaler.scale(loss).backward()
-else:
-loss.backward()
-
-# Check for NaN gradients
-has_nan_grad = False
-for name, param in model.named_parameters():
-if param.grad is not None and torch.isnan(param.grad).any():
-logger.warning(f"NaN gradient detected in {name}")
-has_nan_grad = True
-break
-
-if has_nan_grad:
-logger.warning("NaN gradients detected, skipping optimization step")
-optimizer.zero_grad()
-continue
-
-# Update weights if gradient accumulation steps reached
-if (batch_idx + 1) % gradient_accumulation_steps == 0:
-# Clip gradients
-if scaler:
-scaler.unscale_(optimizer)
-
-torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-# Perform optimization step
-if scaler:
-
+if __name__ == "__main__":
+    main()
