@@ -14,13 +14,75 @@ Based on our evaluation, we found that the best-performing recommendation models
 
 6.IDF
 
+import optuna
+from peft import LoraConfig, get_peft_model
+from torch.utils.data import DataLoader
 
-# Create a new function before train_model
+def create_lora_config(trial):
+    """
+    Create LoRA configuration with hyperparameters suggested by Optuna trial.
+    
+    Args:
+        trial: Optuna trial object
+        
+    Returns:
+        LoraConfig object with optimized hyperparameters
+    """
+    # LoRA hyperparameters to optimize
+    r = trial.suggest_int("lora_r", 8, 64, log=True)  # LoRA rank
+    lora_alpha = trial.suggest_int("lora_alpha", 8, 64, log=True)  # LoRA scaling factor
+    lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.5)  # LoRA dropout
+    
+    # Target modules - could be optimized but often model-dependent
+    # For simplicity, we'll keep the existing targets which seem reasonable
+    target_modules = ["q_proj", "o_proj", "k_proj", "v_proj", "linear", 
+                      "Conv2d", "lm_head", "fc2", "gate_proj", "down_proj", "up_proj"]
+    
+    # Whether to use rank-stabilized LoRA
+    use_rslora = trial.suggest_categorical("use_rslora", [True, False])
+    
+    # Weight initialization method
+    init_lora_weights = trial.suggest_categorical("init_lora_weights", 
+                                                ["gaussian", "loftq"])
+    
+    return LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules=target_modules,
+        task_type="CAUSAL_LM",
+        lora_dropout=lora_dropout,
+        bias="none",  # Could be optimized: "none", "all", "lora_only"
+        inference_mode=False,
+        use_rslora=use_rslora,
+        init_lora_weights=init_lora_weights,
+        modules_to_save=["lm_head", "embed_tokens"],
+    )
+
 def objective(trial):
-    # Define hyperparameters to optimize
-    lr = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+    """
+    Optuna objective function for hyperparameter optimization.
+    Optimizes both training and LoRA hyperparameters.
+    
+    Args:
+        trial: Optuna trial object
+        
+    Returns:
+        best_val_loss: Best validation loss achieved during training
+    """
+    # Training hyperparameters
+    lr = trial.suggest_float("lr", 1e-6, 5e-5, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+    gradient_accumulation_steps = trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4, 8])
+    
+    # Create LoRA configuration
+    lora_config = create_lora_config(trial)
+    
+    # Print trial info
+    print(f"\n==== Trial {trial.number} ====")
+    print(f"Training params: lr={lr}, batch_size={batch_size}, weight_decay={weight_decay}")
+    print(f"LoRA params: r={lora_config.r}, alpha={lora_config.lora_alpha}, dropout={lora_config.lora_dropout}")
+    print(f"Using RS-LoRA: {lora_config.use_rslora}, Init: {lora_config.init_lora_weights}")
     
     # Recreate dataloaders with new batch size
     train_loader = DataLoader(
@@ -38,118 +100,155 @@ def objective(trial):
         num_workers=NUM_WORKERS
     )
     
-    # Re-initialize model each trial to start fresh
-    peft_model = get_peft_model(model, config)
+    # Create a fresh model with the new LoRA config
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_id, 
+        trust_remote_code=True, 
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+    ).to(DEVICE)
+    
+    peft_model = get_peft_model(base_model, lora_config)
+    
+    # Print trainable parameters
+    trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    print(f"Trainable parameters: {trainable_params:,}")
     
     # Train for fewer epochs during optimization
-    val_loss = train_model(train_loader, val_loader, peft_model, processor, 
-                     epochs=5, lr=lr, weight_decay=weight_decay, optuna_trial=True)
-    
-    return val_loss  # Return best validation loss
+    try:
+        val_loss = train_model(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            model=peft_model, 
+            processor=processor, 
+            epochs=3,  # Short training for quicker trials
+            lr=lr,
+            weight_decay=weight_decay,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            patience=2,  # Short patience for quicker trials
+            optuna_trial=True
+        )
+        
+        # Optuna has a pruning mechanism to stop unpromising trials early
+        trial.report(val_loss, 3)  # Report after 3 epochs
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+            
+        return val_loss
+    except Exception as e:
+        print(f"Trial failed with error: {e}")
+        return float('inf')  # Return a bad score if trial fails
 
-
-
-
-
-# Add code to run Optuna before the final training
-# Add after model definition but before final training code
 def run_hyperparameter_search():
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=20)
+    """
+    Run hyperparameter search with Optuna.
     
+    Returns:
+        best_params: Dictionary with optimized hyperparameters
+    """
+    # Create a pruner that stops unpromising trials early
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1)
+    
+    # Create a new study object
+    study = optuna.create_study(
+        direction="minimize",  # We want to minimize validation loss
+        pruner=pruner,
+        study_name="florence2_finetune"
+    )
+    
+    # Start the optimization with 20 trials
+    n_trials = 20
+    print(f"Starting hyperparameter optimization with {n_trials} trials...")
+    study.optimize(objective, n_trials=n_trials)
+    
+    print("\n==== Hyperparameter Optimization Results ====")
     print("Best trial:")
-    trial = study.best_trial
-    print(f"  Value: {trial.value}")
+    best_trial = study.best_trial
+    print(f"  Value (Best Validation Loss): {best_trial.value:.4f}")
     print("  Params: ")
-    for key, value in trial.params.items():
+    for key, value in best_trial.params.items():
         print(f"    {key}: {value}")
     
-    return trial.params
-
-# Uncomment to run hyperparameter search
-# best_params = run_hyperparameter_search()
-# BATCH_SIZE = best_params["batch_size"]
-# LR = best_params["lr"]
-# WEIGHT_DECAY = best_params["weight_decay"]
-
-
-
-
-
-# Modify the train_transform (around line 156) to better handle document-specific needs
-train_transform = A.Compose([
-    A.OneOf([  # More randomness while preserving readability
-        A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.8),
-        A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1, p=0.8),
-    ], p=0.7),
-    A.OneOf([  # Simulate scanning artifacts
-        A.GaussianBlur(blur_limit=(1, 3), p=0.8),
-        A.MotionBlur(blur_limit=(3, 5), p=0.8),
-    ], p=0.5),
-    A.ImageCompression(quality_lower=80, quality_upper=100, p=0.5),
-    A.GaussNoise(var_limit=(5.0, 20.0), p=0.5),
-    A.Perspective(scale=(0.01, 0.03), p=0.3),
-    A.Rotate(limit=2, p=0.7),  # Small rotations only
-    A.ToGray(p=0.2),  # Sometimes convert to grayscale
-    ToTensorV2()  # Add this to convert to tensor directly
-])
-
-
-
-
-# Update the __getitem__ method in DetectionDataset to properly handle transforms
-# Find the __getitem__ method in DetectionDataset class (around line 119)
-def __getitem__(self, idx):
-    image, data = self.dataset[idx]
-    prefix = data['prefix']
-    suffix = data['suffix']
+    # Visualize optimization results if possible
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Plot optimization history
+        plt.figure(figsize=(10, 6))
+        optuna.visualization.matplotlib.plot_optimization_history(study)
+        plt.tight_layout()
+        plt.savefig("optuna_history.png")
+        
+        # Plot parameter importances
+        plt.figure(figsize=(10, 6))
+        optuna.visualization.matplotlib.plot_param_importances(study)
+        plt.tight_layout()
+        plt.savefig("optuna_importance.png")
+        
+        print("Saved optimization plots to 'optuna_history.png' and 'optuna_importance.png'")
+    except Exception as e:
+        print(f"Could not generate plots: {e}")
     
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+    return best_trial.params
+
+# Example usage:
+if __name__ == "__main__":
+    # Run hyperparameter search first
+    best_params = run_hyperparameter_search()
     
-    # Convert PIL to numpy for albumentations
-    image_np = np.array(image)
+    # Set up final training with best hyperparameters
+    print("\n==== Starting final training with best parameters ====")
     
-    # Apply transforms if available
-    if self.transform and self.is_training:
-        transformed = self.transform(image=image_np)
-        # With ToTensorV2() in the transform pipeline, this returns a tensor
-        image_tensor = transformed['image']
-        return prefix, suffix, image_tensor
-    else:
-        # Convert to tensor for validation
-        image_tensor = transforms.ToTensor()(image)
-        return prefix, suffix, image_tensor
-
-
-
-
-
-# Update training loop to use mixed precision where gradient computation happens
-# Inside the train loop around line 310
-if scaler is not None:
-    with torch.cuda.amp.autocast():
-        outputs = model(input_ids=input_ids, pixel_values=pixel_values, labels=labels)
-        loss = outputs.loss
-        if loss.dim() > 0:
-            loss = loss.mean()
+    # Extract and set the best hyperparameters
+    BATCH_SIZE = best_params.get("batch_size", 32)
+    LR = best_params.get("lr", 2e-5)
+    WEIGHT_DECAY = best_params.get("weight_decay", 0.01)
+    GRADIENT_ACCUMULATION_STEPS = best_params.get("gradient_accumulation_steps", 4)
     
-    # Scale the loss and backpropagate
-    scaler.scale(loss).backward()
+    # Create the final LoRA configuration
+    lora_config = LoraConfig(
+        r=best_params.get("lora_r", 16),
+        lora_alpha=best_params.get("lora_alpha", 32),
+        target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "linear", "Conv2d", "lm_head", "fc2", "gate_proj", "down_proj", "up_proj"],
+        task_type="CAUSAL_LM",
+        lora_dropout=best_params.get("lora_dropout", 0.1),
+        bias="none",
+        inference_mode=False,
+        use_rslora=best_params.get("use_rslora", True),
+        init_lora_weights=best_params.get("init_lora_weights", "gaussian"),
+        modules_to_save=["lm_head", "embed_tokens"],
+    )
     
-    # Skip NaN gradients check
-    if not check_for_nan_gradients(model):
-        # Unscale before gradient clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        scaler.update()  # Update scaler even if we skip step
+    # Create dataloaders with best batch size
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        sampler=train_sampler,
+        collate_fn=collate_fn, 
+        num_workers=NUM_WORKERS
+    )
     
-    optimizer.zero_grad()
-else:
-    # Original non-mixed precision code
-
-
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=BATCH_SIZE, 
+        collate_fn=collate_fn,
+        num_workers=NUM_WORKERS
+    )
+    
+    # Initialize model with best LoRA config
+    peft_model = get_peft_model(model, lora_config)
+    peft_model.print_trainable_parameters()
+    
+    # Train the model with best hyperparameters
+    EPOCHS = 30
+    train_model(
+        train_loader=train_loader, 
+        val_loader=val_loader, 
+        model=peft_model, 
+        processor=processor, 
+        epochs=EPOCHS, 
+        lr=LR,
+        weight_decay=WEIGHT_DECAY,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        patience=5  # More patience for final training
+    )
 
