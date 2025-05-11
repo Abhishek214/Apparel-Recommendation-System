@@ -14,6 +14,7 @@ Based on our evaluation, we found that the best-performing recommendation models
 
 6.IDF
 
+
 import optuna
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
@@ -45,18 +46,32 @@ def create_lora_config(trial):
     init_lora_weights = trial.suggest_categorical("init_lora_weights", 
                                                 ["gaussian", "loftq"])
     
-    return LoraConfig(
-        r=r,
-        lora_alpha=lora_alpha,
-        target_modules=target_modules,
-        task_type="CAUSAL_LM",
-        lora_dropout=lora_dropout,
-        bias="none",  # Could be optimized: "none", "all", "lora_only"
-        inference_mode=False,
-        use_rslora=use_rslora,
-        init_lora_weights=init_lora_weights,
-        modules_to_save=["lm_head", "embed_tokens"],
-    )
+    # Configuration dictionary to return
+    config_kwargs = {
+        "r": r,
+        "lora_alpha": lora_alpha,
+        "target_modules": target_modules,
+        "task_type": "CAUSAL_LM",
+        "lora_dropout": lora_dropout,
+        "bias": "none",  # Could be optimized: "none", "all", "lora_only"
+        "inference_mode": False,
+        "use_rslora": use_rslora,
+        "init_lora_weights": init_lora_weights,
+        "modules_to_save": ["lm_head", "embed_tokens"],
+    }
+    
+    # Add loftq_config if loftq initialization is selected
+    if init_lora_weights == "loftq":
+        # Optimize loftq-specific parameters
+        loftq_bits = trial.suggest_categorical("loftq_bits", [4, 8])  # Quantization bits
+        loftq_iter = trial.suggest_int("loftq_iter", 1, 3)  # Number of optimization iterations
+        
+        config_kwargs["loftq_config"] = {
+            "loftq_bits": loftq_bits,
+            "loftq_iter": loftq_iter
+        }
+        
+    return LoraConfig(**config_kwargs)
 
 def objective(trial):
     """
@@ -204,19 +219,29 @@ if __name__ == "__main__":
     WEIGHT_DECAY = best_params.get("weight_decay", 0.01)
     GRADIENT_ACCUMULATION_STEPS = best_params.get("gradient_accumulation_steps", 4)
     
-    # Create the final LoRA configuration
-    lora_config = LoraConfig(
-        r=best_params.get("lora_r", 16),
-        lora_alpha=best_params.get("lora_alpha", 32),
-        target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "linear", "Conv2d", "lm_head", "fc2", "gate_proj", "down_proj", "up_proj"],
-        task_type="CAUSAL_LM",
-        lora_dropout=best_params.get("lora_dropout", 0.1),
-        bias="none",
-        inference_mode=False,
-        use_rslora=best_params.get("use_rslora", True),
-        init_lora_weights=best_params.get("init_lora_weights", "gaussian"),
-        modules_to_save=["lm_head", "embed_tokens"],
-    )
+    # Create the final LoRA configuration with proper handling of loftq
+    lora_kwargs = {
+        "r": best_params.get("lora_r", 16),
+        "lora_alpha": best_params.get("lora_alpha", 32),
+        "target_modules": ["q_proj", "o_proj", "k_proj", "v_proj", "linear", "Conv2d", "lm_head", "fc2", "gate_proj", "down_proj", "up_proj"],
+        "task_type": "CAUSAL_LM",
+        "lora_dropout": best_params.get("lora_dropout", 0.1),
+        "bias": "none",
+        "inference_mode": False,
+        "use_rslora": best_params.get("use_rslora", True),
+        "init_lora_weights": best_params.get("init_lora_weights", "gaussian"),
+        "modules_to_save": ["lm_head", "embed_tokens"],
+    }
+    
+    # Add loftq_config if necessary
+    if best_params.get("init_lora_weights") == "loftq":
+        lora_kwargs["loftq_config"] = {
+            "loftq_bits": best_params.get("loftq_bits", 8),
+            "loftq_iter": best_params.get("loftq_iter", 1)
+        }
+        print(f"Using LoFTQ initialization with bits={best_params.get('loftq_bits', 8)}, iter={best_params.get('loftq_iter', 1)}")
+    
+    lora_config = LoraConfig(**lora_kwargs)
     
     # Create dataloaders with best batch size
     train_loader = DataLoader(
@@ -251,4 +276,3 @@ if __name__ == "__main__":
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         patience=5  # More patience for final training
     )
-
