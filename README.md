@@ -14,168 +14,142 @@ Based on our evaluation, we found that the best-performing recommendation models
 
 6.IDF
 
-7.CNN
-def run_training(
-    model_size="base",
-    train_data=None,
-    train_images=None,
-    val_data=None,
-    val_images=None,
-    epochs=20,
-    batch_size=16,
-    lr=1e-5,
-    checkpoint_dir="./model_checkpoints",
-    tune_hyperparams=False,
-    continue_training=False,
-    num_workers=4,
-    gradient_accumulation_steps=2
-):
-    """Function to orchestrate the training process with given parameters"""
 
-    # Set up the model path based on size
-    model_path = MODEL_LARGE if model_size == "large" else MODEL_BASE
-    logger.info(f"Using model: {model_path}")
-
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-    ).to(DEVICE)
-
-    augmentation = DocumentLayoutAugmentation(rare_class_augment_factor=2.0)
-
-    train_dataset = DetectionDataset(
-        jsonl_file_path=train_data,
-        image_directory_path=train_images,
-        transform=augmentation,
-        is_training=True
-    )
-
-    val_dataset = DetectionDataset(
-        jsonl_file_path=val_data,
-        image_directory_path=val_images,
-        transform=None,
-        is_training=False
-    )
-
-    plot_class_distribution(train_dataset, title="Training Class Distribution")
-    plot_class_distribution(val_dataset, title="Validation Class Distribution")
-
-    if USE_DISTRIBUTED:
-        train_sampler = DistributedSampler(train_dataset)
-        val_sampler = DistributedSampler(val_dataset, shuffle=False)
-    else:
-        weights = torch.DoubleTensor(train_dataset.class_weights)
-        train_sampler = WeightedRandomSampler(weights=weights, num_samples=len(train_dataset), replacement=True)
-        val_sampler = None
-
+# Create a new function before train_model
+def objective(trial):
+    # Define hyperparameters to optimize
+    lr = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+    
+    # Recreate dataloaders with new batch size
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
+        train_dataset, 
+        batch_size=batch_size, 
         sampler=train_sampler,
-        num_workers=num_workers,
-        collate_fn=lambda batch: collate_fn(batch, processor, DEVICE),
-        pin_memory=True
+        collate_fn=collate_fn, 
+        num_workers=NUM_WORKERS
     )
-
+    
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        sampler=val_sampler,
-        num_workers=num_workers,
-        collate_fn=lambda batch: collate_fn(batch, processor, DEVICE),
-        pin_memory=True
+        val_dataset, 
+        batch_size=batch_size, 
+        collate_fn=collate_fn,
+        num_workers=NUM_WORKERS
     )
+    
+    # Re-initialize model each trial to start fresh
+    peft_model = get_peft_model(model, config)
+    
+    # Train for fewer epochs during optimization
+    val_loss = train_model(train_loader, val_loader, peft_model, processor, 
+                     epochs=5, lr=lr, weight_decay=weight_decay, optuna_trial=True)
+    
+    return val_loss  # Return best validation loss
 
-    if tune_hyperparams:
-        logger.info("Starting hyperparameter tuning")
-        best_params = optuna_hyperparameter_search(
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            processor=processor,
-            n_trials=10
-        )
-        logger.info(f"Best hyperparameters: {best_params}")
-        lora_r = best_params.get('lora_r', 16)
-        lora_alpha = best_params.get('lora_alpha', 32)
-        lora_dropout = best_params.get('lora_dropout', 0.1)
-        batch_size = best_params.get('batch_size', batch_size)
-        lr = best_params.get('lr', lr)
+
+
+
+
+# Add code to run Optuna before the final training
+# Add after model definition but before final training code
+def run_hyperparameter_search():
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=20)
+    
+    print("Best trial:")
+    trial = study.best_trial
+    print(f"  Value: {trial.value}")
+    print("  Params: ")
+    for key, value in trial.params.items():
+        print(f"    {key}: {value}")
+    
+    return trial.params
+
+# Uncomment to run hyperparameter search
+# best_params = run_hyperparameter_search()
+# BATCH_SIZE = best_params["batch_size"]
+# LR = best_params["lr"]
+# WEIGHT_DECAY = best_params["weight_decay"]
+
+
+
+
+
+# Modify the train_transform (around line 156) to better handle document-specific needs
+train_transform = A.Compose([
+    A.OneOf([  # More randomness while preserving readability
+        A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.8),
+        A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1, p=0.8),
+    ], p=0.7),
+    A.OneOf([  # Simulate scanning artifacts
+        A.GaussianBlur(blur_limit=(1, 3), p=0.8),
+        A.MotionBlur(blur_limit=(3, 5), p=0.8),
+    ], p=0.5),
+    A.ImageCompression(quality_lower=80, quality_upper=100, p=0.5),
+    A.GaussNoise(var_limit=(5.0, 20.0), p=0.5),
+    A.Perspective(scale=(0.01, 0.03), p=0.3),
+    A.Rotate(limit=2, p=0.7),  # Small rotations only
+    A.ToGray(p=0.2),  # Sometimes convert to grayscale
+    ToTensorV2()  # Add this to convert to tensor directly
+])
+
+
+
+
+# Update the __getitem__ method in DetectionDataset to properly handle transforms
+# Find the __getitem__ method in DetectionDataset class (around line 119)
+def __getitem__(self, idx):
+    image, data = self.dataset[idx]
+    prefix = data['prefix']
+    suffix = data['suffix']
+    
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Convert PIL to numpy for albumentations
+    image_np = np.array(image)
+    
+    # Apply transforms if available
+    if self.transform and self.is_training:
+        transformed = self.transform(image=image_np)
+        # With ToTensorV2() in the transform pipeline, this returns a tensor
+        image_tensor = transformed['image']
+        return prefix, suffix, image_tensor
     else:
-        lora_r = 16
-        lora_alpha = 32
-        lora_dropout = 0.1
+        # Convert to tensor for validation
+        image_tensor = transforms.ToTensor()(image)
+        return prefix, suffix, image_tensor
 
-    lora_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "linear", "lm_head"],
-        task_type="CAUSAL_LM",
-        lora_dropout=lora_dropout,
-        bias="none",
-        inference_mode=False,
-        use_rslora=True,
-        init_lora_weights="gaussian",
-    )
 
-    peft_model = get_peft_model(model, lora_config)
-    logger.info("LoRA model created")
 
-    trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
-    all_params = sum(p.numel() for p in peft_model.parameters())
-    logger.info(f"Trainable parameters: {trainable_params:,} of {all_params:,} "
-                f"({100 * trainable_params / all_params:.2f}%)")
 
-    if USE_DISTRIBUTED:
-        dist.init_process_group(backend="nccl")
-        peft_model = DDP(peft_model, device_ids=[torch.cuda.current_device()])
-        logger.info("Distributed training setup complete")
 
-    optimizer = AdamW(
-        peft_model.parameters(),
-        lr=lr,
-        weight_decay=0.05,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-
-    num_training_steps = len(train_loader) * epochs
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=1, eta_min=1e-7)
-
-    best_model_path = train_model(
-        model=peft_model,
-        processor=processor,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        epochs=epochs,
-        patience=5,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        checkpoint_dir=checkpoint_dir,
-        continue_from_checkpoint=continue_training,
-        visualize_samples=4
-    )
-
-    logger.info(f"Loading best model from {best_model_path}")
-    checkpoint = torch.load(best_model_path, map_location=DEVICE)
-
-    if hasattr(peft_model, 'module'):
-        peft_model.module.load_state_dict(checkpoint['model_state_dict'])
+# Update training loop to use mixed precision where gradient computation happens
+# Inside the train loop around line 310
+if scaler is not None:
+    with torch.cuda.amp.autocast():
+        outputs = model(input_ids=input_ids, pixel_values=pixel_values, labels=labels)
+        loss = outputs.loss
+        if loss.dim() > 0:
+            loss = loss.mean()
+    
+    # Scale the loss and backpropagate
+    scaler.scale(loss).backward()
+    
+    # Skip NaN gradients check
+    if not check_for_nan_gradients(model):
+        # Unscale before gradient clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
     else:
-        peft_model.load_state_dict(checkpoint['model_state_dict'])
+        scaler.update()  # Update scaler even if we skip step
+    
+    optimizer.zero_grad()
+else:
+    # Original non-mixed precision code
 
-    output_dir = os.path.join(checkpoint_dir, "final_model")
-    os.makedirs(output_dir, exist_ok=True)
-    model_to_save = peft_model.module if hasattr(peft_model, 'module') else peft_model
-    model_to_save.save_pretrained(output_dir)
-    processor.save_pretrained(output_dir)
 
-    logger.info(f"Final model saved to {output_dir}")
 
-    if USE_DISTRIBUTED:
-        dist.destroy_process_group()
-
-    logger.info("Training completed successfully!")
