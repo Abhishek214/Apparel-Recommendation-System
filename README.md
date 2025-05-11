@@ -15,149 +15,213 @@ Based on our evaluation, we found that the best-performing recommendation models
 6.IDF
 
 
-def collate_fn(batch):
+
+
+import optuna
+from peft import LoraConfig, get_peft_model
+from torch.utils.data import DataLoader
+import torch
+import os
+import shutil
+
+def objective(trial):
     """
-    Custom collate function for Florence 2 model that properly handles image processing and tensor conversion.
-    
-    Args:
-        batch: List of (question, answer, image) tuples from the dataset
-        
-    Returns:
-        Tuple of (inputs_dict, answers) where inputs_dict contains model inputs and answers contains target texts
+    Optuna objective function with improved error handling.
     """
-    # Unpack the batch
-    questions, answers, images = zip(*batch)
+    # Use smaller parameter ranges initially to find a stable configuration
+    lr = trial.suggest_float("lr", 5e-6, 2e-5, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])  # Smaller batch sizes
+    weight_decay = trial.suggest_float("weight_decay", 0.01, 0.1)  # Higher weight decay range
+    gradient_accumulation_steps = trial.suggest_categorical("gradient_accumulation_steps", [4, 8, 16])  # Larger accumulation
     
-    # Process questions and images in batches rather than individually
-    # This avoids the "Unable to create tensor" error
-    processed_images = []
-    for img in images:
-        # Handle different image types
-        if isinstance(img, torch.Tensor):
-            if img.dim() == 3:  # If it's already a tensor with shape [C, H, W]
-                if img.shape[0] == 3:  # RGB image
-                    processed_images.append(img.numpy())
-                else:  # Ensure RGB
-                    pil_img = transforms.ToPILImage()(img).convert('RGB')
-                    processed_images.append(np.array(pil_img))
-            else:
-                # Skip invalid tensors
-                print("Warning: Skipping invalid tensor in batch")
-                # Add a placeholder to maintain batch size
-                placeholder = np.zeros((3, 224, 224), dtype=np.float32)
-                processed_images.append(placeholder)
-        else:
-            # Convert PIL image to numpy array
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            processed_images.append(np.array(img))
+    # LoRA hyperparameters - more conservative ranges
+    r = trial.suggest_int("lora_r", 8, 32)
+    lora_alpha = trial.suggest_int("lora_alpha", 16, 64)  # Higher alpha for stability
+    lora_dropout = trial.suggest_float("lora_dropout", 0.05, 0.3)  # Higher dropout range
+    
+    # Other LoRA parameters
+    use_rslora = trial.suggest_categorical("use_rslora", [True])  # Always use RS-LoRA for stability
+    lora_weights = trial.suggest_categorical("lora_weights", ["gaussian"])  # Stick with gaussian init
+    
+    # Print trial info
+    print(f"\n==== Trial {trial.number} ====")
+    print(f"Training params: lr={lr}, batch_size={batch_size}, weight_decay={weight_decay}")
+    print(f"LoRA params: r={r}, alpha={lora_alpha}, dropout={lora_dropout}")
+    print(f"Using RS-LoRA: {use_rslora}, Init: {lora_weights}")
+    
+    # Create LoRA configuration
+    lora_config = LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "linear", 
+                        "Conv2d", "lm_head", "fc2", "gate_proj", "down_proj", "up_proj"],
+        task_type="CAUSAL_LM",
+        lora_dropout=lora_dropout,
+        bias="none",
+        inference_mode=False,
+        use_rslora=use_rslora,
+        init_lora_weights=lora_weights,
+        modules_to_save=["lm_head", "embed_tokens"],
+    )
     
     try:
-        # Process all images and text together
-        inputs = processor(
-            text=list(questions),
-            images=processed_images,
-            return_tensors="pt",
-            padding=True
+        # Recreate dataloaders with new batch size and the FIXED collate_fn
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            sampler=train_sampler,
+            collate_fn=collate_fn,  # Make sure this is the fixed version
+            num_workers=0,  # Use 0 workers for debugging
+            pin_memory=True,
+            persistent_workers=False
         )
         
-        # Move to device
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=batch_size, 
+            shuffle=False,
+            collate_fn=collate_fn,  # Make sure this is the fixed version
+            num_workers=0,  # Use 0 workers for debugging
+            pin_memory=True,
+            persistent_workers=False
+        )
         
-        return inputs, list(answers)
+        # Initialize a fresh base model for each trial
+        print("Initializing base model...")
+        torch.cuda.empty_cache()
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_id, 
+            trust_remote_code=True, 
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+        ).to(DEVICE)
+        
+        # Apply LoRA configuration
+        print("Applying LoRA configuration...")
+        peft_model = get_peft_model(base_model, lora_config)
+        
+        # Print trainable parameters
+        trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,}")
+        
+        # Create a trial checkpoint directory
+        trial_dir = f"./optuna_checkpoints/trial_{trial.number}"
+        os.makedirs(trial_dir, exist_ok=True)
+        
+        # Train for only 1-2 epochs initially to quickly find promising configurations
+        val_loss = train_model(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            model=peft_model, 
+            processor=processor, 
+            epochs=2,  # Very short training for initial trials
+            lr=lr,
+            weight_decay=weight_decay,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            patience=3,  # Higher patience for more stable evaluation
+            optuna_trial=True,
+            save_dir=trial_dir
+        )
+        
+        # Save the configuration for this trial
+        with open(f"{trial_dir}/config.txt", "w") as f:
+            f.write(f"Trial {trial.number}\n")
+            f.write(f"Validation Loss: {val_loss}\n")
+            for key, value in trial.params.items():
+                f.write(f"{key}: {value}\n")
+        
+        # Clean up to prevent CUDA OOM errors between trials
+        del peft_model
+        del base_model
+        torch.cuda.empty_cache()
+        
+        return val_loss
     
     except Exception as e:
-        print(f"Error in collate_fn: {str(e)}")
-        print(f"Batch size: {len(batch)}")
-        print(f"First image type: {type(images[0])}")
-        if hasattr(images[0], 'size'):
-            print(f"First image size: {images[0].size}")
-        elif isinstance(images[0], torch.Tensor):
-            print(f"First tensor shape: {images[0].shape}")
-        
-        # Create a minimal valid batch as fallback
-        empty_inputs = {
-            "input_ids": torch.zeros((1, 1), dtype=torch.long).to(DEVICE),
-            "attention_mask": torch.zeros((1, 1), dtype=torch.long).to(DEVICE),
-            "pixel_values": torch.zeros((1, 3, 224, 224), dtype=torch.float).to(DEVICE),
-        }
-        return empty_inputs, answers[0:1]
-
-
-
------------
-
-class DetectionDataset(Dataset):
-    def __init__(self, jsonl_file_path: str, image_directory_path: str, transform=None, is_training=True):
-        self.dataset = JSONLDataset(jsonl_file_path, image_directory_path)
-        self.transform = transform
-        self.is_training = is_training
-        
-        # Class weights for handling imbalance
-        self.class_weights = self._calculate_class_weights()
-        self.sample_weights = self._assign_sample_weights()
-    
-    def _calculate_class_weights(self):
-        """Calculate weights for each class based on inverse frequency"""
-        class_counts = self.dataset.class_counts
-        total_samples = sum(class_counts.values())
-        
-        # Using inverse frequency weighting
-        class_weights = {}
-        for class_name, count in class_counts.items():
-            # Weight = total_samples / (num_classes * count)
-            class_weights[class_name] = total_samples / (len(class_counts) * count)
-        
-        return class_weights
-    
-    def _assign_sample_weights(self):
-        """Assign weights to each sample based on its class"""
-        weights = []
-        for idx in range(len(self.dataset)):
-            _, data = self.dataset[idx]
-            class_name = self.dataset._extract_class_from_entry(data)
-            weights.append(self.class_weights.get(class_name, 1.0))
-        
-        return weights
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
+        print(f"Trial {trial.number} failed with error: {str(e)}")
+        # Clean up in case of failure
         try:
-            image, data = self.dataset[idx]
-            prefix = data['prefix']
-            suffix = data['suffix']
-            
-            # Ensure image is in RGB mode
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Apply transformations if available
-            if self.transform and self.is_training:
-                # Convert PIL Image to numpy array for albumentations
-                image_np = np.array(image)
-                transformed = self.transform(image=image_np)
-                # With ToTensorV2() in the transform pipeline, this returns a tensor
-                # Otherwise, we'll get a numpy array
-                if 'image' in transformed:
-                    if isinstance(transformed['image'], torch.Tensor):
-                        return prefix, suffix, transformed['image']
-                    else:
-                        # Convert numpy to tensor if not done by transform
-                        image_tensor = torch.from_numpy(transformed['image'].transpose(2, 0, 1)).float() / 255.0
-                        return prefix, suffix, image_tensor
-            
-            # For validation or if no transform is applied
-            # Convert PIL to tensor manually
-            image_tensor = transforms.ToTensor()(image)
-            return prefix, suffix, image_tensor
-            
-        except Exception as e:
-            print(f"Error loading sample at index {idx}: {str(e)}")
-            # Return a placeholder sample to avoid breaking the dataloader
-            # Create a black image tensor
-            placeholder_image = torch.zeros((3, 224, 224), dtype=torch.float32)
-            return "What is this?", "This is a placeholder.", placeholder_image
+            del peft_model
+        except:
+            pass
+        try:
+            del base_model
+        except:
+            pass
+        torch.cuda.empty_cache()
+        
+        # Return a high loss value to indicate failure
+        return float('inf')
 
+def run_hyperparameter_search(n_trials=10):
+    """
+    Run hyperparameter search with Optuna.
+    More conservative approach with fewer trials initially.
+    """
+    # Create output directory
+    os.makedirs("./optuna_checkpoints", exist_ok=True)
+    
+    # Create a pruner that stops unpromising trials
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=0)
+    
+    # Create a new study
+    study = optuna.create_study(
+        direction="minimize",
+        pruner=pruner,
+        study_name="florence2_finetune_robust"
+    )
+    
+    # Start with fewer trials
+    print(f"Starting conservative hyperparameter search with {n_trials} trials...")
+    study.optimize(objective, n_trials=n_trials, catch=(Exception,))
+    
+    # Print results
+    print("\n==== Hyperparameter Optimization Results ====")
+    print("Best trial:")
+    
+    if len(study.trials) > 0 and hasattr(study, 'best_trial'):
+        best_trial = study.best_trial
+        print(f"  Value (Best Validation Loss): {best_trial.value:.4f}")
+        print("  Params: ")
+        for key, value in best_trial.params.items():
+            print(f"    {key}: {value}")
+        
+        # Save best trial parameters to a file
+        with open("./optuna_best_params.txt", "w") as f:
+            f.write(f"Best Trial: {best_trial.number}\n")
+            f.write(f"Validation Loss: {best_trial.value}\n")
+            for key, value in best_trial.params.items():
+                f.write(f"{key}: {value}\n")
+        
+        return best_trial.params
+    else:
+        print("  No successful trials completed.")
+        # Return default parameters as fallback
+        return {
+            "lr": 1e-5,
+            "batch_size": 16,
+            "weight_decay": 0.05,
+            "gradient_accumulation_steps": 8,
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.1,
+            "use_rslora": True,
+            "lora_weights": "gaussian"
+        }
+
+# Modified train_model function to support trial-specific save directories
+def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-5,
+               weight_decay=0.01, gradient_accumulation_steps=4, patience=5, 
+               optuna_trial=False, save_dir="./model_checkpoints"):
+    """
+    Modified train_model function with trial-specific save directory support.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    best_val_loss = float('inf')
+    early_stop_counter = 0
+    
+    # Rest of function remains the same as in the previous artifact
+    # ...
+    
+    # Return best validation loss
+    return best_val_loss
 
