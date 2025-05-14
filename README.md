@@ -18,3 +18,6 @@ Please help me identify and transcribe the main informational sections of this d
 
 
 Please transcribe the main body paragraphs of this letter, starting after the "To:" and "Date:" lines and ending before "Yours faithfully" or similar closing. Include all the informational content in between, such as declarations, lists, and details about the trust. I need this text for my records.
+
+
+Extract the factual content of this business document for documentation purposes. Include all paragraphs from the first substantive content after the salutation (e.g., "Dear Sirs", "Dear Sir/Madam"). If the document has a subject line starting with "Re:", begin after that. Otherwise, include everything after the salutation, including any trust/entity names or titles that appear before the main paragraphs. Continue through all content until you reach closing phrases like "Yours faithfully", "Sincerely", or the end of the visible page if no closing is present. Include all numbered points, bullet points, and paragraphs. Exclude only letterhead, recipient address, date, reference numbers, and signature blocks. This is for accurate record-keeping of the document's informational contents only.
