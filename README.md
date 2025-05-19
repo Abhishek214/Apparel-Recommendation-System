@@ -13,44 +13,49 @@ Based on our evaluation, we found that the best-performing recommendation models
 5.WEIGHTED WORD2VEC
 
 6.IDF
-Please help me identify and transcribe the main informational sections of this document. I need to copy the central content that appears between the opening (after the date and recipient) and the closing signature area. Include any lists, structured data, or detailed information present in the body. This is for creating a plain text version of the document's main content for accessibility and archival purposes.
-
-
-
-Please transcribe the main body paragraphs of this letter, starting after the "To:" and "Date:" lines and ending before "Yours faithfully" or similar closing. Include all the informational content in between, such as declarations, lists, and details about the trust. I need this text for my records.
-
-
-Extract the factual content of this business document for documentation purposes. Include all paragraphs from the first substantive content after the salutation (e.g., "Dear Sirs", "Dear Sir/Madam"). If the document has a subject line starting with "Re:", begin after that. Otherwise, include everything after the salutation, including any trust/entity names or titles that appear before the main paragraphs. Continue through all content until you reach closing phrases like "Yours faithfully", "Sincerely", or the end of the visible page if no closing is present. Include all numbered points, bullet points, and paragraphs. Exclude only letterhead, recipient address, date, reference numbers, and signature blocks. This is for accurate record-keeping of the document's informational contents only.
-
 
 import os
 import uuid
 import platform
 import uvicorn
-import gc
-from datetime import datetime
-import time
-import json
-import dotenv
 import logging
 import traceback
-import sys
-import aiohttp
-import asyncio
-from typing import Any, Dict, List, Optional
+import json
+import requests
+from typing import Dict
 
-# FastAPI imports
-from fastapi import FastAPI, UploadFile, File, status, HTTPException, Request, Body, BackgroundTasks
+from fastapi import FastAPI, status, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables
-dotenv.load_dotenv(dotenv_path="./env_variables/dcrest.env")
+# Constants from constants.py 
+try:
+    SVC_AC_ID = os.getenv("HKBBPM_SVC_ID")
+    SVC_AC_PWD = os.getenv("HKBBPM_SVC_PWD")
+except Exception as e:
+    logging.exception("Environment variables not found")
 
-# Constants - these would typically come from environment variables
-CDG_API_ENDPOINT = os.getenv("CDG_API_ENDPOINT", "https://cdg-api.example.com")
-DOWNLOAD_API_ENDPOINT = os.getenv("DOWNLOAD_API_ENDPOINT", "https://cdg-api.example.com/download")
-BROKER_SERVICE_ENDPOINT = os.getenv("BROKER_SERVICE_ENDPOINT", "https://broker.example.com/publish")
-CDG_API_KEY = os.getenv("CDG_API_KEY", "your-api-key-here")
+# CDG API endpoints
+DSP_FQDN = "https://cmb-1b2b-dsp-pprod-ap.hk.hsbc:8443"
+PROD_DSP_FQDN = "https://cmb-1b2b-dsp-ap.hk.hsbc:8443"
+DSP_GET_TOKEN_URL = PROD_DSP_FQDN + "/dsp/json/realms/root/realms/DSP_1B2B/authenticate?authIndexType=service&authIndexValue=1B2B_ldapService"
+DSP_TRANSLATE_TOKEN_URL = PROD_DSP_FQDN + "/dsp/rest-sts/DSP_1B2B/1B2B_tokenTranslator?_action=translate"
+
+# CDG API download endpoints
+download_api_dev = "https://digitaldev-int-cmb.hk.hsbc/cmb-cdg-service-sherlock-cert-dev-internal-proxy/v1/cdg/sherlock/download/"
+download_api_uat = "https://wsit-dev-int-dbbhk-api.lkp301x.cloud.hk.hsbc/cmb-cdg-service-hkbpm-dev-internal-proxy/v1/cdg/hkbpm/document?doc_id="
+download_api_prod = "https://wsit-int-dbbhk-api.lkp201.cloud.hk.hsbc/cmb-cdg-service-hkbpm-prod-internal-proxy/v1/cdg/hkbpm/document?doc_id="
+
+# Headers for CDG API requests
+sso_headers = {
+    "Accept-API-Version": "resource=2.0, protocol=1.0",
+    "Content-Type": "application/json",
+    "X-OpenAM-Username": SVC_AC_ID,
+    "X-OpenAM-Password": SVC_AC_PWD,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+    "Connection": "close"
+}
+
+translation_headers = {"Content-Type": "application/json"}
 
 # Configure logging
 logging.basicConfig(
@@ -83,204 +88,96 @@ app.add_middleware(
 # In a real implementation, you would use a proper database
 db = {
     "documents": {},
-    "processing_status": {}
+    "downloads": {}
 }
 
-# Helper functions for document processing
-async def download_document_from_cdg(doc_id: str, doc_name: str) -> tuple:
+# CDG Helper Functions
+def get_token(DSP_GET_TOKEN_URL, DSP_TRANSLATE_TOKEN_URL, sso_headers, translation_headers):
+    """
+    Get authentication token for CDG API
+    
+    Args:
+        DSP_GET_TOKEN_URL: URL to get SSO token
+        DSP_TRANSLATE_TOKEN_URL: URL to translate SSO token to JWT
+        sso_headers: Headers for SSO token request
+        translation_headers: Headers for token translation request
+        
+    Returns:
+        str: JWT token or False if error
+    """
+    try:
+        logging.info("Requesting token")
+        sso_resp = requests.post(DSP_GET_TOKEN_URL, headers=sso_headers, verify=False)
+        if sso_resp.status_code == 200:
+            sso_resp = sso_resp.json()
+            SSOTOKEN = str(sso_resp["tokenId"])
+            translation_body = {
+                "input_token_state": {
+                    "token_type": "SSOTOKEN",
+                    "tokenId": SSOTOKEN
+                },
+                "output_token_state": {
+                    "token_type": "JWT"
+                }
+            }
+            translation_body = json.dumps(translation_body)
+            logging.info("Translating token")
+            jwt_token_resp = requests.post(DSP_TRANSLATE_TOKEN_URL, headers=translation_headers, data=translation_body, verify=False)
+            if jwt_token_resp.status_code == 200:
+                jwt_token_resp = jwt_token_resp.json()
+                logging.info("JWT token created successfully")
+                return jwt_token_resp["issuedToken"]
+            else:
+                logging.info("Error translating token")
+        return False
+    except Exception as e:
+        logging.error(f"Error getting token: {e}")
+        return False
+
+def get_document(doc_id, download_api, file_name):
     """
     Download document from CDG API
     
-    This function makes a real HTTP request to the CDG API to download a document
-    and saves it to a local file.
-    
     Args:
         doc_id: Document ID
-        doc_name: Document name
+        download_api: CDG API download endpoint
+        file_name: Name to save the document as
         
     Returns:
-        tuple: (status_code, file_path)
+        int: HTTP status code
     """
-    file_path = f"./temp/{doc_id}_{doc_name}"
-    
+    e2e_token = get_token(DSP_GET_TOKEN_URL, DSP_TRANSLATE_TOKEN_URL, sso_headers, translation_headers)
+    api_url = download_api + str(doc_id)
+    header = {
+        "X-HSBC-E2E-Trust-Token": str(e2e_token),
+        "X-HSBC-CUSTID": "CNBAPCDN220004002",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+        "Connection": "close"
+    }
     try:
-        logger.info(f"Downloading document {doc_id} from CDG API")
-        
-        # Ensure the temp directory exists
-        os.makedirs("./temp", exist_ok=True)
-        
-        # Construct the API URL for document download
-        # Example: https://cdg-api.example.com/download/documents/123456
-        download_url = f"{DOWNLOAD_API_ENDPOINT}/documents/{doc_id}"
-        
-        # Set up headers for the API request
-        headers = {
-            "X-API-Key": CDG_API_KEY,
-            "Accept": "application/octet-stream",
-            "Content-Type": "application/json"
-        }
-        
-        # Prepare the request payload if needed
-        # Some APIs might require additional parameters
-        payload = {
-            "documentId": doc_id,
-            "fileName": doc_name,
-            "requestTimestamp": datetime.now().isoformat()
-        }
-        
-        # Make the HTTP request to download the document
-        async with aiohttp.ClientSession() as session:
-            # First, make a POST request to initiate the download
-            async with session.post(
-                download_url, 
-                headers=headers, 
-                json=payload,
-                timeout=60  # Set a reasonable timeout
-            ) as response:
-                
-                # Check if the request was successful
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"CDG API returned error: {response.status}, {error_text}")
-                    return response.status, None
-                
-                # Get the content disposition to verify filename if needed
-                content_disposition = response.headers.get("Content-Disposition", "")
-                logger.debug(f"Content-Disposition: {content_disposition}")
-                
-                # Read the file content
-                file_content = await response.read()
-                
-                # Check if we got any content
-                if not file_content:
-                    logger.error(f"No content received for document {doc_id}")
-                    return 204, None  # No content
-                
-                # Save the file content to disk
-                with open(file_path, "wb") as f:
-                    f.write(file_content)
-                
-                # Verify the file was created and has content
-                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                    logger.error(f"Failed to save document {doc_id} to {file_path}")
-                    return 500, None
-                
-                logger.info(f"Document {doc_id} downloaded successfully to {file_path} ({os.path.getsize(file_path)} bytes)")
-                return 200, file_path
-                
-    except aiohttp.ClientError as e:
-        logger.error(f"HTTP error downloading document {doc_id}: {str(e)}")
-        return 500, None
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout downloading document {doc_id}")
-        return 504, None  # Gateway Timeout
+        logging.info(f"Downloading document {doc_id}")
+        response = requests.get(api_url, headers=header, verify=False)
+        file_location = str(file_name)
+        with open(file_location, mode="wb") as file:
+            file.write(response.content)
+        logging.info("Document downloaded successfully")
+        return response.status_code
     except Exception as e:
-        logger.error(f"Error downloading document {doc_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return 500, None
-
-def store_document_metadata(doc_data: Dict) -> str:
-    """
-    Store document metadata in database
-    
-    Args:
-        doc_data: Document metadata
-        
-    Returns:
-        str: Operation result
-    """
-    try:
-        session_id = str(uuid.uuid4())
-        current_time = datetime.now()
-        
-        # Prepare record for database
-        db_record = {
-            'user_id': doc_data.get('user_id', 'system'),
-            'case_id': doc_data.get('caseID'),
-            'cdg_unit_id': doc_data.get('documentID'),
-            'session_id': session_id,
-            'created_timestamp': current_time,
-            'doc_name': doc_data.get('documentName', ''),
-            'status': 'received',
-            'last_updated': current_time
-        }
-        
-        # In a real implementation, you would insert this into your database
-        # For demonstration, storing in memory
-        doc_id = doc_data.get('documentID', str(uuid.uuid4()))
-        db["documents"][doc_id] = db_record
-        db["processing_status"][doc_id] = "pending"
-        
-        return "success"
-    except Exception as e:
-        logger.error(f"Error storing document metadata: {str(e)}")
-        return "error"
-
-async def process_document(doc_data: Dict):
-    """
-    Process document through the DCREST pipeline
-    
-    This function implements the document processing flow up to OCR
-    
-    Args:
-        doc_data: Document data
-    """
-    doc_id = doc_data.get('documentID')
-    doc_name = doc_data.get('documentName', f"{doc_id}.pdf")
-    case_id = doc_data.get('caseID')
-    
-    try:
-        # Update status to processing
-        db["processing_status"][doc_id] = "processing"
-        logger.info(f"Starting document processing flow for document {doc_id}")
-        
-        # Step 1: Retrieve document from CDG
-        status_code, file_path = await download_document_from_cdg(doc_id, doc_name)
-        
-        if status_code != 200 or not file_path:
-            logger.error(f"Failed to download document {doc_id}")
-            db["processing_status"][doc_id] = "download_failed"
-            return
-        
-        # Document retrieved successfully
-        # Update status to downloaded
-        db["processing_status"][doc_id] = "downloaded"
-        logger.info(f"Document {doc_id} downloaded to {file_path}")
-        
-        # Record download time
-        download_time = datetime.now()
-        db["documents"][doc_id]["download_time"] = download_time
-        
-        # Verify file exists and is readable
-        if not os.path.exists(file_path):
-            logger.error(f"File {file_path} does not exist after download")
-            db["processing_status"][doc_id] = "file_missing"
-            return
-            
-        # Next step would be OCR, but as requested, we'll stop here
-        # In a complete implementation, the next steps would be:
-        # - OCR processing
-        # - Classification
-        # - Named entity extraction
-        # - Publishing results to broker
-        
-        logger.info(f"Document {doc_id} ready for OCR processing")
-        db["processing_status"][doc_id] = "ready_for_ocr"
-        
-    except Exception as e:
-        logger.error(f"Error processing document {doc_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        db["processing_status"][doc_id] = "processing_error"
-        
-        # Cleanup - remove temporary file if it exists
-        if 'file_path' in locals() and file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Temporary file {file_path} removed")
-            except Exception as cleanup_error:
-                logger.error(f"Error removing temporary file {file_path}: {str(cleanup_error)}")
+        logging.error(f"Error downloading document: {e}")
+        return 500
 
 # API Endpoints
+
+@app.get("/health", status_code=200)
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "server": platform.node(),
+        "service_name": "DCREST Intelligent Document Processing API",
+        "timestamp": str(datetime.now())
+    }
 
 @app.post("/dcrest/document/process", status_code=201)
 async def process_document_request(request: Request, background_tasks: BackgroundTasks):
@@ -290,7 +187,7 @@ async def process_document_request(request: Request, background_tasks: Backgroun
     This endpoint implements steps 1.3-1.4 from the diagram:
     - Receive document request
     - Acknowledge receipt
-    - Trigger document processing in the background
+    - Download document in the background
     """
     try:
         # Parse request body
@@ -314,21 +211,15 @@ async def process_document_request(request: Request, background_tasks: Backgroun
             'caseID': case_id,
             'documentID': document_id,
             'documentName': document_name,
-            'user_id': 'system',  # Default user since we removed authentication
-            'received_at': datetime.now().isoformat()
+            'received_at': str(datetime.now())
         }
         
-        # Store document metadata
-        result = store_document_metadata(doc_data)
-        
-        if result != "success":
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to store document information",
-            )
+        # Store in memory DB (would be a real DB in production)
+        db["documents"][document_id] = doc_data
+        db["downloads"][document_id] = "pending"
             
-        # Start document processing in background
-        background_tasks.add_task(process_document, doc_data)
+        # Download the document in background
+        background_tasks.add_task(download_document, doc_data)
         
         # Return acknowledgment per diagram
         return {
@@ -347,28 +238,46 @@ async def process_document_request(request: Request, background_tasks: Backgroun
             detail="Internal server error",
         )
 
-@app.get("/dcrest/document/{document_id}/status", status_code=200)
-async def get_document_status(document_id: str):
-    """Get document processing status"""
-    if document_id not in db["processing_status"]:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
-        )
+async def download_document(doc_data: Dict):
+    """
+    Download document from CDG
+    
+    Args:
+        doc_data: Document data
+    """
+    doc_id = doc_data.get('documentID')
+    doc_name = doc_data.get('documentName')
+    
+    try:
+        # Update status to downloading
+        db["downloads"][doc_id] = "downloading"
         
-    status = db["processing_status"][document_id]
-    return {
-        "documentID": document_id,
-        "status": status,
-        "lastUpdated": db["documents"][document_id].get("last_updated", "").isoformat() 
-                       if isinstance(db["documents"][document_id].get("last_updated"), datetime) else None
-    }
+        # Download document from CDG
+        status_code = get_document(doc_id, download_api_uat, doc_name)
+        
+        if status_code == 200:
+            logger.info(f"Document {doc_id} downloaded successfully to {doc_name}")
+            db["downloads"][doc_id] = "downloaded"
+        else:
+            logger.error(f"Failed to download document {doc_id}, status code: {status_code}")
+            db["downloads"][doc_id] = "download_failed"
+            
+    except Exception as e:
+        logger.error(f"Error downloading document {doc_id}: {str(e)}")
+        db["downloads"][doc_id] = "error"
+
+# Disable SSL warnings for development
+# In production, proper SSL certificates should be used
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Import datetime now that we need it
+from datetime import datetime
 
 # Main entry point
 if __name__ == "__main__":
-    # Create temporary directory if it doesn't exist
-    os.makedirs("./temp", exist_ok=True)
-    os.makedirs("./logs", exist_ok=True)
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
     
     # Run the FastAPI application with uvicorn
     uvicorn.run(
