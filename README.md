@@ -14,32 +14,37 @@ Based on our evaluation, we found that the best-performing recommendation models
 
 6.IDF
 
+
+
 {
-  "formType": "Annual Return (Form NAR1)",
-  "companyInformation": {
+  "formHeader": {
     "companyNumber": "",
     "englishCompanyName": "",
-    "chineseCompanyName": "",
-    "typeOfCompany": {
-      "options": [
-        "Private Company",
-        "Public Company",
-        "Company Limited By Guarantee"
-      ],
-      "selected": ""
-    },
-    "dateReturnMadeUp": ""
+    "chineseCompanyName": ""
   },
   "forOfficialUse": {
-    "documentationGuidelines": "Ensure to have Company Registry's received and filing. Such as: invoice pasted (match Co. ID) or Bar Code (match Co. ID) or \"RECEIVED\" chop or \"e\" documents (check if Document Ref No &\" PIN\" on page 7 \"signed\"). Or 'Filed'",
+    "instructions": "Ensure to have Company Registry's received and filing. Such as: invoice pasted (match Co. ID) or Bar Code (match Co. ID) or \"RECEIVED\" chop or \"e\" documents (check if Document Ref No &\" PIN\" on page 7 \"signed\") or 'Filed'",
     "status": "Y/N"
   },
-  "directors": {
-    "naturalPerson": {
+  "sections": {
+    "deletion": {
       "capacity": {
-        "director": "Y/N",
-        "alternateDirector": "Y/N",
-        "alternateTo": ""
+        "director": {
+          "field": "Director",
+          "status": "Y/N"
+        },
+        "alternateDirector": {
+          "field": "Alternate Director",
+          "status": "Y/N"
+        },
+        "alternateTo": {
+          "field": "Alternate to (name)",
+          "value": ""
+        },
+        "companySecretary": {
+          "field": "Company Secretary",
+          "status": "Y/N"
+        }
       },
       "name": {
         "chinese": "",
@@ -51,13 +56,58 @@ Based on our evaluation, we found that the best-performing recommendation models
         "passportNumber": "",
         "othersID": ""
       },
+      "dateOfCessation": ""
+    },
+    "appointmentNaturalPerson": {
+      "capacity": {
+        "director": {
+          "field": "Director",
+          "status": "Y/N"
+        },
+        "alternateDirector": {
+          "field": "Alternate Director",
+          "status": "Y/N"
+        },
+        "alternateTo": {
+          "field": "Alternate to (name)",
+          "value": ""
+        },
+        "companySecretary": {
+          "field": "Company Secretary",
+          "status": "Y/N"
+        }
+      },
+      "name": {
+        "chinese": "",
+        "englishSurname": "",
+        "englishOtherNames": ""
+      },
+      "idNumber": {
+        "hongKongIdentifyCardNumber": "",
+        "passportNumber": "",
+        "othersID": ""
+      },
+      "dateOfAppointment": "",
       "emailAddress": ""
     },
-    "bodyCorporate": {
+    "appointmentBodyCorporate": {
       "capacity": {
-        "director": "Y/N",
-        "alternateDirector": "Y/N",
-        "alternateTo": ""
+        "director": {
+          "field": "Director",
+          "status": "Y/N"
+        },
+        "alternateDirector": {
+          "field": "Alternate Director",
+          "status": "Y/N"
+        },
+        "alternateTo": {
+          "field": "Alternate to (name)",
+          "status": "Y/N"
+        },
+        "companySecretary": {
+          "field": "Company Secretary",
+          "status": "Y/N"
+        }
       },
       "companyName": {
         "chinese": "",
@@ -67,17 +117,7 @@ Based on our evaluation, we found that the best-performing recommendation models
       "emailAddress": ""
     }
   },
-  "companySecretary": {
-    "name": {
-      "chinese": "",
-      "english": ""
-    },
-    "identificationNumber": ""
-  },
   "continuationSheet": {
-    "options": ["A-X", "B-X", "C-X", "..."],
-    "details": "Extract the details from Continuation sheets"
+    "indicator": "A - X"
   }
 }
-
-
