@@ -15,109 +15,50 @@ Based on our evaluation, we found that the best-performing recommendation models
 6.IDF
 
 
-
 {
-  "formHeader": {
-    "companyNumber": "",
-    "englishCompanyName": "",
-    "chineseCompanyName": ""
-  },
-  "forOfficialUse": {
-    "instructions": "Ensure to have Company Registry's received and filing. Such as: invoice pasted (match Co. ID) or Bar Code (match Co. ID) or \"RECEIVED\" chop or \"e\" documents (check if Document Ref No &\" PIN\" on page 7 \"signed\") or 'Filed'",
-    "status": "Y/N"
-  },
-  "sections": {
-    "deletion": {
-      "capacity": {
-        "director": {
-          "field": "Director",
-          "status": "Y/N"
-        },
-        "alternateDirector": {
-          "field": "Alternate Director",
-          "status": "Y/N"
-        },
-        "alternateTo": {
-          "field": "Alternate to (name)",
-          "value": ""
-        },
-        "companySecretary": {
-          "field": "Company Secretary",
-          "status": "Y/N"
-        }
-      },
-      "name": {
-        "chinese": "",
-        "englishSurname": "",
-        "englishOtherNames": ""
-      },
-      "idNumber": {
-        "hongKongIdentifyCardNumber": "",
-        "passportNumber": "",
-        "othersID": ""
-      },
-      "dateOfCessation": ""
-    },
-    "appointmentNaturalPerson": {
-      "capacity": {
-        "director": {
-          "field": "Director",
-          "status": "Y/N"
-        },
-        "alternateDirector": {
-          "field": "Alternate Director",
-          "status": "Y/N"
-        },
-        "alternateTo": {
-          "field": "Alternate to (name)",
-          "value": ""
-        },
-        "companySecretary": {
-          "field": "Company Secretary",
-          "status": "Y/N"
-        }
-      },
-      "name": {
-        "chinese": "",
-        "englishSurname": "",
-        "englishOtherNames": ""
-      },
-      "idNumber": {
-        "hongKongIdentifyCardNumber": "",
-        "passportNumber": "",
-        "othersID": ""
-      },
-      "dateOfAppointment": "",
-      "emailAddress": ""
-    },
-    "appointmentBodyCorporate": {
-      "capacity": {
-        "director": {
-          "field": "Director",
-          "status": "Y/N"
-        },
-        "alternateDirector": {
-          "field": "Alternate Director",
-          "status": "Y/N"
-        },
-        "alternateTo": {
-          "field": "Alternate to (name)",
-          "status": "Y/N"
-        },
-        "companySecretary": {
-          "field": "Company Secretary",
-          "status": "Y/N"
-        }
-      },
-      "companyName": {
-        "chinese": "",
-        "english": ""
-      },
-      "companyNumber": "",
-      "emailAddress": ""
+  "formTitle": "Passport",
+  "documentInformation": {
+    "documentType": "P",
+    "passportNo": "",
+    "personalDetails": {
+      "surname": "",
+      "givenNames": "",
+      "sex": "",
+      "nationality": "",
+      "dateOfExpiry": "",
+      "dateOfBirth": ""
     }
   },
-  "continuationSheet": {
-    "indicator": "A - X"
+  "outputColumn": {
+    "header": "Output",
+    "values": {}
+  }
+}
+
+
+
+
+{
+  "formTitle": "HKID",
+  "documentInformation": {
+    "documentType": "I",
+    "personalDetails": {
+      "nameInEnglish": "",
+      "nameInChinese": "",
+      "idNumber": "",
+      "sex": "",
+      "dateOfBirth": "",
+      "chineseCommercialCode": ""
+    }
+  },
+  "outputColumn": {
+    "header": "Output",
+    "values": {}
+  },
+  "interfaceDetails": {
+    "autoSave": "Off",
+    "currentView": "Chart1",
+    "status": "Ready",
+    "accessibility": "Investigate"
   }
 }
