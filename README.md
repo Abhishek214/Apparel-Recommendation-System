@@ -1,215 +1,166 @@
+import platform
+import os
+import sys
+import uvicorn
+from fastapi import FastAPI, Header, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+
+# Import your auth and PVT modules
 from source.auth import auth
-import requests
+from pvt import PVT
 
-def PVT():
-    """
-    Function to test the authentication functionality using the auth function.
-    Returns True if the authentication is successful, otherwise returns False.
-    """
-    
-    try:
-        # Test with a sample JWT token (replace with actual test token)
-        test_jwt_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.token"  # Replace with actual test token
-        
-        # Call the auth function with the test JWT token
-        result = auth(test_jwt_token)
-        
-        # Check if the result is not None and contains expected user info
-        if result is not None:
-            print('PVT PASS')  # Log success message
-            print(f"Auth result: {result}")  # Print the auth result for debugging
-            return True
-        else:
-            print('PVT Failed')  # Log failure message
-            return False
-            
-    # Handle HTTP errors
-    except requests.exceptions.HTTPError as e:
-        print("Message: Unable to authenticate user",
-              "Exception: " + str(e))
-        return False
-        
-    # Handle connection-related errors
-    except requests.exceptions.ConnectionError as e:
-        print("Message: Unable to connect to auth service",
-              "Exception: " + str(e))
-        return False
-        
-    # Handle timeout errors
-    except requests.exceptions.Timeout as e:
-        print("Message: Auth service timeout",
-              "Exception: " + str(e))
-        return False
-        
-    # Handle invalid token errors
-    except ValueError as e:
-        print("Message: Invalid JWT token format",
-              "Exception: " + str(e))
-        return False
-        
-    # Handle attribute-related errors
-    except AttributeError as e:
-        print("Message: Unable to process auth response",
-              "Exception: " + str(e))
-        return False
-        
-    # Handle any other exceptions
-    except Exception as e:
-        print("Message: Unable to authenticate user",
-              "Exception: " + str(e))
-        return False
+# Added pvt by Vipin
+from pvt import PVT
 
+# Added by Vipin for Health
+uname = platform.uname()
 
-def PVT_WITH_VALID_TOKEN():
-    """
-    Function to test auth with a known valid token structure.
-    """
-    
-    try:
-        # Example of a more realistic test token structure
-        # You should replace this with actual valid tokens from your system
-        valid_test_tokens = [
-            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoidGVzdF91c2VyIiwiaWF0IjoxNjMwMDAwMDAwfQ.test_signature"
-        ]
-        
-        for i, token in enumerate(valid_test_tokens):
-            print(f"\n--- Testing Token {i+1} ---")
-            result = auth(token)
-            
-            if result is not None:
-                print(f'Token {i+1}: PVT PASS')
-                print(f"User info: {result}")
-                if 'user' in result:
-                    print(f"User ID: {result['user']}")
-            else:
-                print(f'Token {i+1}: PVT Failed')
-                
-        return True
-        
-    except Exception as e:
-        print("Message: Error in token testing",
-              "Exception: " + str(e))
-        return False
+def get_uptime_millis():
+    with open('/proc/uptime', 'r') as f:
+        uptime_seconds = float(f.readline().split()[0])
+    return int(uptime_seconds * 1000)
 
+uptime_millis = get_uptime_millis()
+version = os.getenv("APP_VERSION")
 
-def PVT_WITH_INVALID_TOKEN():
-    """
-    Function to test auth with invalid tokens to ensure proper error handling.
-    """
-    
-    try:
-        invalid_tokens = [
-            "",  # Empty token
-            "invalid_token",  # Invalid format
-            "Bearer ",  # Empty bearer token
-            "Bearer invalid.jwt.token",  # Malformed JWT
-            None,  # None token
-        ]
-        
-        print("\n--- Testing Invalid Tokens ---")
-        for i, token in enumerate(invalid_tokens):
-            try:
-                print(f"\nTesting invalid token {i+1}: {token}")
-                result = auth(token)
-                
-                if result is None:
-                    print(f'Invalid token {i+1}: Correctly rejected')
-                else:
-                    print(f'Invalid token {i+1}: Unexpectedly accepted - {result}')
-                    
-            except Exception as e:
-                print(f'Invalid token {i+1}: Correctly rejected with exception - {str(e)}')
-                
-        return True
-        
-    except Exception as e:
-        print("Message: Error in invalid token testing",
-              "Exception: " + str(e))
-        return False
+# Added by Vipin for Health
 
+app = FastAPI(root_path='/dcrest/v1/auth')
 
-def PVT_FULL_AUTH_TEST():
-    """
-    Comprehensive auth testing function.
-    """
-    
-    print("=" * 50)
-    print("STARTING COMPREHENSIVE AUTH TESTING")
-    print("=" * 50)
-    
-    # Test 1: Basic auth test
-    print("\n1. Basic Auth Test:")
-    basic_result = PVT()
-    
-    # Test 2: Valid token tests
-    print("\n2. Valid Token Tests:")
-    valid_result = PVT_WITH_VALID_TOKEN()
-    
-    # Test 3: Invalid token tests
-    print("\n3. Invalid Token Tests:")
-    invalid_result = PVT_WITH_INVALID_TOKEN()
-    
-    # Summary
-    print("\n" + "=" * 50)
-    print("AUTH TESTING SUMMARY")
-    print("=" * 50)
-    print(f"Basic Auth Test: {'PASS' if basic_result else 'FAIL'}")
-    print(f"Valid Token Test: {'PASS' if valid_result else 'FAIL'}")
-    print(f"Invalid Token Test: {'PASS' if invalid_result else 'FAIL'}")
-    
-    overall_result = basic_result and valid_result and invalid_result
-    print(f"Overall Result: {'PASS' if overall_result else 'FAIL'}")
-    
-    return overall_result
+@app.get("/health", status_code=200, description="Status report of api and system")
+def health():
+    return {
+        "healthy": "true",
+        "elmId": "9929948",
+        "server": uname.node,
+        "componentName": "dcrest-auth",
+        "version": version,
+        "description": "Description of this service",
+        "sourceCodeRepoUrl": "https://alm-github.systems.uk.hsbc/GBM-COT-ECO-ML/DCREST-AUTH.git",
+        "documentationUrl": "NA",
+        "apiSpecificationUrl": "https://dcrest-internal-sit.uk.hsbc/dcrest/v1/auth/openapi.json",
+        "businessImpact": "This service has business impact",
+        "runtime": {
+            "name": "PYTHON",
+            "version": sys.version
+        },
+        "uptimeInMillis": uptime_millis
+    }
 
+@app.get("/ready", status_code=200, description="Status report of api and system")
+def ready():
+    return {
+        "server": uname.node,
+        "service_name": "Auth API",
+        "status": "alive"
+    }
 
-# Additional utility function for testing specific user scenarios
-def PVT_USER_SCENARIO(user_id="test_user", jwt_token=None):
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html(req: Request):
+    root_path = req.scope.get("root_path", "").rstrip("/")
+    openapi_url = root_path + app.openapi_url
+    return get_swagger_ui_html(
+        openapi_url=openapi_url,
+        title="auth",
+    )
+
+@app.post("/validate-token", status_code=200)
+async def validate_token(
+    DCREST_JWT_TOKEN: str = Header(),
+    X_HSBC_Request_Correlation_Id: str = Header()
+):
     """
-    Test auth for a specific user scenario.
+    Validate JWT token and return user information.
     
     Args:
-        user_id (str): The user ID to test
-        jwt_token (str): Optional JWT token, if None uses a default test token
-    """
+        DCREST_JWT_TOKEN: JWT token for authentication
+        X_HSBC_Request_Correlation_Id: Request correlation ID for tracking
     
+    Returns:
+        User information if token is valid
+    """
     try:
-        if jwt_token is None:
-            # Create a mock token for testing (replace with actual token generation logic)
-            jwt_token = f"Bearer test_token_for_{user_id}"
+        # Validate the token using auth function
+        verify = auth(DCREST_JWT_TOKEN)
         
-        print(f"\n--- Testing User Scenario: {user_id} ---")
-        result = auth(jwt_token)
+        if verify is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token"
+            )
         
-        if result is not None:
-            print(f'User {user_id}: Authentication PASS')
-            print(f"User details: {result}")
-            
-            # Verify the user ID matches
-            if 'user' in result and result['user'] == user_id:
-                print(f"User ID verification: PASS")
-            else:
-                print(f"User ID verification: FAIL (expected {user_id}, got {result.get('user', 'None')})")
-                
-            return True
-        else:
-            print(f'User {user_id}: Authentication FAIL')
-            return False
-            
+        response = {
+            "valid": True,
+            "user_info": verify,
+            "correlation_id": X_HSBC_Request_Correlation_Id
+        }
+        
+        return jsonable_encoder(response)
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"User {user_id}: Authentication ERROR - {str(e)}")
-        return False
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Token validation failed"
+        )
 
+@app.post("/authenticate", status_code=200)
+async def authenticate_user(
+    DCREST_JWT_TOKEN: str = Header(),
+    X_HSBC_Request_Correlation_Id: str = Header()
+):
+    """
+    Authenticate user and return authentication status.
+    """
+    try:
+        verify = auth(DCREST_JWT_TOKEN)
+        
+        if verify:
+            return jsonable_encoder({
+                "authenticated": True,
+                "user": verify.get("user", "unknown"),
+                "correlation_id": X_HSBC_Request_Correlation_Id
+            })
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication failed"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication service error"
+        )
+
+# Include router for auth functionality
+app.include_router(AuthServer)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 if __name__ == "__main__":
-    # Run the comprehensive test when script is executed directly
-    PVT_FULL_AUTH_TEST()
-    
-    # Test specific user scenarios
-    print("\n" + "=" * 30)
-    print("USER SCENARIO TESTS")
-    print("=" * 30)
-    PVT_USER_SCENARIO("john_doe")
-    PVT_USER_SCENARIO("admin_user")
-    PVT_USER_SCENARIO("test_user_123")
+    # Added PVT function by vipin before starting the application
+    if PVT():
+        uvicorn.run(
+            "application:app",
+            host=host,
+            port=port,
+            log_level="debug",
+            workers=1,
+            reload=True
+        )
+        #ssl_keyfile=ssl_keyfile,
+        #ssl_certfile = ssl_certfile
+    else:
+        print("PVT FAILED SO NOT STARTING THE APPLICATION")
