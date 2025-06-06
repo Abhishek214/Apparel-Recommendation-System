@@ -1,83 +1,98 @@
+import requests
 import os
-import sys
-import platform
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
+from source.auth import create_access_token
 
-# Added pvt by Vipin
-from pvt import PVT
-
-# Added by Vipin for Health
-uname = platform.uname()
-
-def get_uptime_millis():
-    with open('/proc/uptime', 'r') as f:
-        uptime_seconds = float(f.readline().split()[0])
-    return int(uptime_seconds * 1000)
-
-uptime_millis = get_uptime_millis()
-version = os.getenv("APP_VERSION")
-
-# Added by Vipin for Health
-app = FastAPI(root_path='/dcrest/v1/auth')
-
-@app.get("/health", status_code=200, description="Status report of api and system")
-def health():
-    return {
-        "healthy": "true",
-        "eimId": "9929948",
-        "server": uname.node,
-        "componentName": "dcrest-auth",
-        "version": version,
-        "description": "Auth service for DCREST",
-        "sourceCodeRepoUrl": "https://alm-github.systems.uk.hsbc/GBM-COT-ECO-ML/DCREST-AUTH.git",
-        "documentationUrl": "NA",
-        "apiSpecificationUrl": "https://dcrest-internal-sit.uk.hsbc/dcrest/v1/auth/openapi.json",
-        "businessImpact": "This service handles authentication",
-        "runtime": {
-            "name": "PYTHON",
-            "version": sys.version
-        },
-        "uptimeInMillis": uptime_millis
-    }
-
-@app.get("/ready", status_code=200, description="Status report of api and system")
-def ready():
-    return {
-        "server": uname.node,
-        "service_name": "Auth API",
-        "status": "alive"
-    }
-
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html(req: Request):
-    root_path = req.scope.get("root_path", "").rstrip("/")
-    openapi_url = root_path + app.openapi_url
-    return get_swagger_ui_html(
-        openapi_url=openapi_url,
-        title="auth",
-    )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def PVT():
+    """
+    Function to test the upload file functionality.
+    Returns True if the upload is successful, otherwise returns False.
+    """
+    
+    try:
+        # Create test JWT token
+        test_token = create_access_token(data={"user": "testuser"})
+        
+        # Test session creation first
+        session_url = "http://localhost:8000/extraction/session"
+        session_headers = {
+            "DCREST_JWT_TOKEN": test_token,
+            "X_HSBC_Request_Correlation_Id": "test-correlation-id",
+            "azure_token": "test-azure-token"
+        }
+        
+        session_response = requests.post(session_url, headers=session_headers)
+        
+        if session_response.status_code == 201:
+            session_data = session_response.json()
+            session_token = session_data.get("session")
+            
+            # Create a test file
+            test_file_path = "test_document.txt"
+            with open(test_file_path, "w") as f:
+                f.write("This is a test document for upload testing.")
+            
+            # Test file upload
+            upload_url = "http://localhost:8000/extraction/upload-file"
+            upload_headers = {
+                "DCREST_JWT_TOKEN": test_token,
+                "X_HSBC_Request_Correlation_Id": "test-upload-id",
+                "azure_token": "test-azure-token"
+            }
+            
+            upload_data = {
+                "session_token": session_token,
+                "multimodal": True,
+                "chunking_strategy": "BY_PAGE"
+            }
+            
+            with open(test_file_path, "rb") as f:
+                files = {"files": ("test_document.txt", f, "text/plain")}
+                upload_response = requests.post(
+                    upload_url, 
+                    headers=upload_headers, 
+                    data=upload_data, 
+                    files=files
+                )
+            
+            # Clean up test file
+            if os.path.exists(test_file_path):
+                os.remove(test_file_path)
+            
+            if upload_response.status_code == 201:
+                print('PVT PASS')  # Log success message
+                return True
+            else:
+                print(f'Upload failed with status: {upload_response.status_code}')
+                print('PVT Failed')  # Log failure message
+                return False
+        else:
+            print(f'Session creation failed with status: {session_response.status_code}')
+            print('PVT Failed')
+            return False
+    
+    # Handle HTTP errors
+    except requests.exceptions.HTTPError as e:
+        print("Message: Unable to upload file",
+              "Exception: " + str(e))
+        return False
+    
+    # Handle attribute-related errors
+    except AttributeError as e:
+        print("Message: Unable to upload file",
+              "Exception: " + str(e))
+        return False
+    
+    # Handle value-related errors
+    except ValueError as e:
+        print("Message: Unable to upload file",
+              "Exception: " + str(e))
+        return False
+    
+    # Handle any other exceptions
+    except Exception as e:
+        print("Message: Unable to upload file",
+              "Exception: " + str(e))
+        return False
 
 if __name__ == "__main__":
-    # Added PVT function by vipin before starting the application
-    if PVT():
-        uvicorn.run(
-            "application:app",
-            host="0.0.0.0",
-            port=8000,
-            log_level="debug",
-            workers=1,
-            reload=True
-        )
-    else:
-        print("PVT FAILED SO NOT STARTING The Application")
+    PVT()
