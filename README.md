@@ -1,287 +1,182 @@
-# ================================================================
-# 1. Fixed Application.py
-# ================================================================
-
-import os
-from contextlib import asynccontextmanager
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.docs import get_swagger_ui_html
-
-############### APP IMPORTS ###################
-from configurations.params import host, port, workers, ssl_keyfile, ssl_certfile
-############################################
-
-app = FastAPI(
-    title="Document Upload Service",
-    description="Document Upload and Processing Service",
-    version="1.0.0",
-    root_path="/dcrest/v1/upload/"
-)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup event
-    print("Upload service starting up...")
-    yield
-    # Shutdown event
-    print("Upload service shutting down...")
-
-app.router.lifespan_context = lifespan
-
-# Import and include extraction router
-from routers.extraction_server import ExtractionServer
-app.include_router(ExtractionServer)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html(req: Request):
-    root_path = req.scope.get("root_path", "").rstrip("/")
-    openapi_url = root_path + app.openapi_url
-    return get_swagger_ui_html(
-        openapi_url=openapi_url,
-        title="Upload Service Documentation",
-    )
-
-@app.get("/")
-async def root():
-    return {"message": "Upload Service is running", "status": "healthy"}
-
-if __name__ == "__main__":
-    # Test PVT function before starting the application
-    try:
-        print("="*50)
-        print("RUNNING PVT TESTS BEFORE STARTING APPLICATION")
-        print("="*50)
-        
-        # Import and run PVT function
-        from pvt import PVT
-        pvt_result = PVT()
-        
-        if pvt_result:
-            print("PVT TESTS PASSED - Starting application...")
-        else:
-            print("PVT TESTS FAILED - Starting application anyway...")
-            
-    except Exception as e:
-        print(f"PVT Test error: {e}")
-        print("Starting application anyway...")
-    
-    print("="*50)
-    print("STARTING FASTAPI APPLICATION")
-    print("="*50)
-    
-    uvicorn.run(
-        "Application:app",
-        host=host,
-        port=port,
-        log_level="debug",
-        workers=workers,
-        reload=False,  # Set to False to avoid issues
-        ssl_keyfile=ssl_keyfile,
-        ssl_certfile=ssl_certfile
-    )
-
-# ================================================================
-# 2. Fixed pvt.py
-# ================================================================
-
 import requests
 import os
 
 def PVT():
     """
-    Function to test the upload file functionality using test tokens.
+    Function to test the upload file functionality using REAL tokens and APIs.
     Returns True if the upload is successful, otherwise returns False.
     """
     
     try:
-        # Test tokens - replace these with actual test tokens from your system
-        test_jwt_token = "test-jwt-token-12345"
-        test_correlation_id = "test-hsbc-correlation-id-67890"
-        test_azure_token = "test-azure-token-abcdef"
+        # REAL TOKENS - Replace these with actual tokens from your system
+        # You need to get these from your actual authentication system
+        real_jwt_token = "PUT_REAL_JWT_TOKEN_HERE"
+        real_correlation_id = "correlation-id-12345"  # Or generate UUID
+        real_azure_token = "PUT_REAL_AZURE_TOKEN_HERE"
         
-        print("Starting upload functionality test...")
-        print("NOTE: This is a basic function test, not testing actual API endpoints")
-        print(f"Using JWT Token: {test_jwt_token}")
-        print(f"Using Correlation ID: {test_correlation_id}")
-        print(f"Using Azure Token: {test_azure_token}")
-        
-        # Test 1: Test core functionality without external dependencies
-        print("\n1. Testing core upload functionality...")
-        
-        # Import and test the core functions
-        try:
-            from source.ragClient import sessionToken, upload_files
-            from source.constants import CHUNKING_METHODS
-            
-            print("✓ Successfully imported ragClient functions")
-            print("✓ Successfully imported constants")
-            
-        except ImportError as e:
-            print(f"✗ Import error: {e}")
-            print("This is expected if external dependencies are not available")
-        
-        # Test 2: Create and validate test file
-        print("\n2. Testing file operations...")
-        test_file_path = "test_document.txt"
-        test_content = "This is a test document for upload testing.\nLine 2 of test content.\nEnd of test file."
-        
-        try:
-            with open(test_file_path, "w") as f:
-                f.write(test_content)
-            print(f"✓ Test file created: {test_file_path}")
-            
-            # Verify file was created and has content
-            if os.path.exists(test_file_path):
-                with open(test_file_path, "r") as f:
-                    content = f.read()
-                if content == test_content:
-                    print("✓ File content verified")
-                else:
-                    print("✗ File content mismatch")
-            
-            # Clean up test file
-            os.remove(test_file_path)
-            print("✓ Test file cleaned up")
-            
-        except Exception as e:
-            print(f"✗ File operation error: {e}")
+        # Check if tokens are placeholder values
+        if "PUT_REAL" in real_jwt_token or "PUT_REAL" in real_azure_token:
+            print("ERROR: Please replace placeholder tokens with real tokens")
+            print("You need to get actual JWT and Azure tokens from your system")
+            print('PVT Failed - No real tokens provided')
             return False
         
-        # Test 3: Validate token format (basic validation)
-        print("\n3. Testing token validation...")
-        if test_jwt_token and len(test_jwt_token) > 10:
-            print("✓ JWT token format appears valid")
-        else:
-            print("✗ JWT token format invalid")
+        base_url = "http://localhost:8000"  # Your running application
         
-        if test_correlation_id and len(test_correlation_id) > 5:
-            print("✓ Correlation ID format appears valid")
-        else:
-            print("✗ Correlation ID format invalid")
+        print("Starting REAL upload functionality test...")
+        print(f"Using Real JWT Token: {real_jwt_token[:30]}...")
+        print(f"Using Correlation ID: {real_correlation_id}")
+        print(f"Using Real Azure Token: {real_azure_token[:30]}...")
         
-        if test_azure_token and len(test_azure_token) > 10:
-            print("✓ Azure token format appears valid")
-        else:
-            print("✗ Azure token format invalid")
+        # Step 1: Test session creation with REAL tokens
+        print("\n1. Testing session creation with real APIs...")
+        session_headers = {
+            "DCREST_JWT_TOKEN": real_jwt_token,
+            "X_HSBC_Request_Correlation_Id": real_correlation_id,
+            "azure_token": real_azure_token
+        }
         
-        print("\n" + "="*50)
-        print('PVT PASS - Basic functionality tests completed')
-        print("="*50)
-        return True
+        session_response = requests.post(
+            f"{base_url}/extraction/session", 
+            headers=session_headers,
+            timeout=30
+        )
+        
+        print(f"Session response status: {session_response.status_code}")
+        print(f"Session response: {session_response.text}")
+        
+        if session_response.status_code != 201:
+            print(f"Session creation failed: {session_response.text}")
+            print('PVT Failed - Session creation failed')
+            return False
+            
+        session_data = session_response.json()
+        session_token = session_data.get("session")
+        print(f"✓ Session token created: {session_token}")
+        
+        # Step 2: Create a real test file
+        print("\n2. Creating test document...")
+        test_file_path = "test_upload_document.pdf"  # Use PDF as it's commonly supported
+        test_content = b"Sample PDF content for upload testing"  # Binary content for PDF
+        
+        with open(test_file_path, "wb") as f:
+            f.write(test_content)
+        print(f"✓ Test file created: {test_file_path}")
+        
+        # Step 3: Test REAL file upload
+        print("\n3. Testing REAL file upload...")
+        upload_headers = {
+            "DCREST_JWT_TOKEN": real_jwt_token,
+            "X_HSBC_Request_Correlation_Id": real_correlation_id,
+            "azure_token": real_azure_token
+        }
+        
+        upload_data = {
+            "session_token": session_token,
+            "multimodal": True,
+            "chunking_strategy": "BY_PAGE"
+        }
+        
+        with open(test_file_path, "rb") as f:
+            files = {"files": (test_file_path, f, "application/pdf")}
+            upload_response = requests.post(
+                f"{base_url}/extraction/upload-file",
+                headers=upload_headers,
+                data=upload_data,
+                files=files,
+                timeout=60  # Longer timeout for file upload
+            )
+        
+        print(f"Upload response status: {upload_response.status_code}")
+        print(f"Upload response: {upload_response.text}")
+        
+        # Clean up test file
+        if os.path.exists(test_file_path):
+            os.remove(test_file_path)
+            print("✓ Test file cleaned up")
+        
+        # Check upload result
+        if upload_response.status_code == 201:
+            upload_result = upload_response.json()
+            document_id = upload_result.get("documentID")
+            if document_id:
+                print(f"✓ Upload successful! Document ID: {document_id}")
+                print('PVT PASS - Real upload completed successfully')
+                return True
+            else:
+                print("✗ Upload response missing documentID")
+                print('PVT Failed - Invalid upload response')
+                return False
+        else:
+            print(f"✗ Upload failed with status {upload_response.status_code}")
+            print('PVT Failed - Upload request failed')
+            return False
     
-    # Handle requests-related errors
-    except ImportError as e:
-        if "requests" in str(e):
-            print("Message: requests module not available",
-                  "Exception: " + str(e))
-        else:
-            print("Message: Import error",
-                  "Exception: " + str(e))
+    # Handle specific HTTP errors
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error: {e}")
+        print("Message: Unable to upload file - HTTP error")
         return False
     
-    # Handle attribute-related errors
-    except AttributeError as e:
-        print("Message: Unable to test upload file functionality",
-              "Exception: " + str(e))
+    # Handle connection errors
+    except requests.exceptions.ConnectionError as e:
+        print(f"Connection Error: {e}")
+        print("Message: Unable to connect to server - ensure Application.py is running")
         return False
     
-    # Handle value-related errors
-    except ValueError as e:
-        print("Message: Unable to test upload file functionality",
-              "Exception: " + str(e))
+    # Handle timeout errors
+    except requests.exceptions.Timeout as e:
+        print(f"Timeout Error: {e}")
+        print("Message: Request timed out - server may be slow")
+        return False
+    
+    # Handle other request errors
+    except requests.exceptions.RequestException as e:
+        print(f"Request Error: {e}")
+        print("Message: Unable to upload file - request failed")
         return False
     
     # Handle any other exceptions
     except Exception as e:
-        print("Message: Unable to test upload file functionality",
-              "Exception: " + str(e))
+        print(f"Unexpected Error: {e}")
+        print("Message: Unable to upload file - unexpected error")
         return False
 
-def test_api_endpoints():
-    """
-    Test API endpoints if server is running
-    """
-    try:
-        base_url = "http://localhost:8000"
-        
-        # Test health endpoint
-        health_response = requests.get(f"{base_url}/extraction/health", timeout=5)
-        if health_response.status_code == 200:
-            print("✓ Health endpoint working")
-            return True
-        else:
-            print(f"✗ Health endpoint failed: {health_response.status_code}")
-            return False
-            
-    except requests.exceptions.ConnectionError:
-        print("✗ Cannot connect to server - server not running")
-        return False
-    except Exception as e:
-        print(f"✗ API test error: {e}")
-        return False
+def get_tokens_info():
+    """Helper function to show how to get real tokens"""
+    print("="*60)
+    print("HOW TO GET REAL TOKENS:")
+    print("="*60)
+    print("1. JWT TOKEN (DCREST_JWT_TOKEN):")
+    print("   - Login to your application's frontend")
+    print("   - Check browser developer tools > Network tab")
+    print("   - Look for 'DCREST_JWT_TOKEN' in request headers")
+    print("")
+    print("2. AZURE TOKEN:")
+    print("   - Get from Azure AD authentication")
+    print("   - Or check existing API calls for 'azure_token' header")
+    print("")
+    print("3. CORRELATION ID:")
+    print("   - Can be any unique string")
+    print("   - Format: 'correlation-id-' + timestamp or UUID")
+    print("="*60)
 
 if __name__ == "__main__":
     print("="*50)
-    print("TESTING UPLOAD FUNCTIONALITY")
+    print("TESTING REAL UPLOAD FUNCTIONALITY")
     print("="*50)
     
-    # Run basic functionality tests
-    result = PVT()
+    # Show token info first
+    get_tokens_info()
     
-    # Try to test API endpoints if possible
-    if result:
-        print("\nTesting API endpoints...")
-        api_result = test_api_endpoints()
-        if not api_result:
-            print("Note: API endpoints not available (server not running)")
+    print("\nStarting real API tests...")
+    result = PVT()
     
     print("\n" + "="*50)
     if result:
         print("OVERALL TEST RESULT: PASS")
+        print("✓ Real authentication and upload working!")
     else:
         print("OVERALL TEST RESULT: FAIL")
+        print("✗ Check tokens and ensure server is running")
     print("="*50)
-
-# ================================================================
-# 3. Create a simple test runner script: test_runner.py
-# ================================================================
-
-"""
-# test_runner.py - Simple script to test without running full application
-
-import sys
-import os
-
-# Add current directory to path
-sys.path.append(os.getcwd())
-
-def run_tests():
-    try:
-        from pvt import PVT
-        print("Running PVT tests...")
-        result = PVT()
-        
-        if result:
-            print("All tests passed!")
-            return True
-        else:
-            print("Some tests failed!")
-            return False
-            
-    except Exception as e:
-        print(f"Test runner error: {e}")
-        return False
-
-if __name__ == "__main__":
-    run_tests()
-"""
