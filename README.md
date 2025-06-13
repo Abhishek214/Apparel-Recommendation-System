@@ -1,227 +1,245 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-import os
-import io
+import requests
+from io import BytesIO
 
-def PVT():
-    """
-    Function to test the upload file functionality using FastAPI TestClient.
-    Returns True if the upload is successful, otherwise returns False.
-    """
+# Test configuration
+BASE_URL = "http://localhost:6303"  # Update with your server URL
+ENDPOINT = "/dcrest/v1/idp/warden/check-classification"
+
+# Test headers
+TEST_HEADERS = {
+    "DCREST-JWT-TOKEN": "valid.test.token.here",  # Replace with valid JWT
+    "X-HSBC-Request-Correlation-Id": "test-correlation-123",
+    "azure-token": "Bearer test.azure.token"  # Replace with valid Azure token
+}
+
+def create_test_file(filename="test_document.pdf"):
+    """Create a simple test file"""
+    file_content = b"Test document content for classification testing"
+    return BytesIO(file_content)
+
+def test_public_document_approval():
+    """Test that PUBLIC classified document is APPROVED"""
+    print("Testing PUBLIC document approval...")
+    
+    # Create test file that should be classified as PUBLIC
+    test_file = create_test_file("PUBLIC_document.pdf")
+    
+    files = {
+        'file': ('PUBLIC_document.pdf', test_file, 'application/pdf')
+    }
     
     try:
-        # Import the FastAPI application
-        from Application import app
-        
-        # Create a TestClient instance
-        client = TestClient(app)
-        
-        # Test tokens - these can be test values since we're using TestClient
-        test_jwt_token = "test-jwt-token-12345"
-        test_correlation_id = "test-hsbc-correlation-id-67890"
-        test_azure_token = "test-azure-token-abcdef"
-        
-        print("Starting upload functionality test with TestClient...")
-        print(f"Using JWT Token: {test_jwt_token}")
-        print(f"Using Correlation ID: {test_correlation_id}")
-        print(f"Using Azure Token: {test_azure_token}")
-        
-        # Step 1: Test health endpoint
-        print("\n1. Testing health endpoint...")
-        health_response = client.get("/extraction/health")
-        print(f"Health response status: {health_response.status_code}")
-        print(f"Health response: {health_response.json()}")
-        
-        assert health_response.status_code == 200
-        print("✓ Health endpoint test passed")
-        
-        # Step 2: Test session creation
-        print("\n2. Testing session creation...")
-        session_headers = {
-            "DCREST_JWT_TOKEN": test_jwt_token,
-            "X_HSBC_Request_Correlation_Id": test_correlation_id,
-            "azure_token": test_azure_token
-        }
-        
-        session_response = client.post(
-            "/extraction/session", 
-            headers=session_headers
+        response = requests.post(
+            BASE_URL + ENDPOINT,
+            headers=TEST_HEADERS,
+            files=files,
+            verify=False
         )
         
-        print(f"Session response status: {session_response.status_code}")
-        print(f"Session response: {session_response.text}")
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
         
-        if session_response.status_code == 201:
-            session_data = session_response.json()
-            session_token = session_data.get("session")
-            print(f"✓ Session token created: {session_token}")
-        else:
-            print(f"Session creation returned status {session_response.status_code}")
-            # Continue with mock session for testing
-            session_token = "mock-session-token-for-testing"
-            print(f"Using mock session token: {session_token}")
-        
-        # Step 3: Create test file for upload
-        print("\n3. Creating test file for upload...")
-        test_file_content = b"This is a test document for upload testing.\nLine 2 of test content.\nEnd of test file."
-        test_file_name = "test_document.txt"
-        
-        # Create file-like object for upload
-        test_file = io.BytesIO(test_file_content)
-        test_file.name = test_file_name
-        
-        print(f"✓ Test file prepared: {test_file_name}")
-        
-        # Step 4: Test file upload
-        print("\n4. Testing file upload...")
-        upload_headers = {
-            "DCREST_JWT_TOKEN": test_jwt_token,
-            "X_HSBC_Request_Correlation_Id": test_correlation_id,
-            "azure_token": test_azure_token
-        }
-        
-        upload_data = {
-            "session_token": session_token,
-            "multimodal": True,
-            "chunking_strategy": "BY_PAGE"
-        }
-        
-        # Upload file using TestClient
-        upload_response = client.post(
-            "/extraction/upload-file",
-            headers=upload_headers,
-            data=upload_data,
-            files={"files": (test_file_name, test_file, "text/plain")}
-        )
-        
-        print(f"Upload response status: {upload_response.status_code}")
-        print(f"Upload response: {upload_response.text}")
-        
-        # Check upload result
-        if upload_response.status_code == 201:
-            upload_result = upload_response.json()
-            document_id = upload_result.get("documentID")
-            if document_id:
-                print(f"✓ Upload successful! Document ID: {document_id}")
-                print('PVT PASS - Upload completed successfully')
-                return True
-            else:
-                print("✓ Upload endpoint working (external service may not be available)")
-                print('PVT PASS - Upload logic tested successfully')
-                return True
-        elif upload_response.status_code == 500:
-            # This is expected if external services are not available
-            print("Upload returned 500 - likely due to external service dependencies")
-            print("✓ Upload endpoint is working, external service integration needed")
-            print('PVT PASS - Upload logic tested successfully')
+        # Should return True (200 status) for PUBLIC documents
+        if response.status_code == 200 and response.json() == True:
+            print("✓ PUBLIC document correctly APPROVED")
             return True
         else:
-            print(f"✗ Upload failed with unexpected status {upload_response.status_code}")
-            print('PVT Failed - Unexpected upload response')
+            print("✗ PUBLIC document incorrectly REJECTED")
             return False
-    
-    # Handle import errors
-    except ImportError as e:
-        print(f"Import Error: {e}")
-        print("Message: Unable to import required modules")
-        return False
-    
-    # Handle assertion errors
-    except AssertionError as e:
-        print(f"Assertion Error: {e}")
-        print("Message: Test assertion failed")
-        return False
-    
-    # Handle attribute-related errors
-    except AttributeError as e:
-        print(f"Attribute Error: {e}")
-        print("Message: Unable to access required attributes")
-        return False
-    
-    # Handle value-related errors
-    except ValueError as e:
-        print(f"Value Error: {e}")
-        print("Message: Invalid value encountered during testing")
-        return False
-    
-    # Handle any other exceptions
+            
     except Exception as e:
-        print(f"Unexpected Error: {e}")
-        print("Message: Unable to complete upload file testing")
+        print(f"✗ Test failed: {e}")
         return False
 
-def test_individual_endpoints():
-    """Test individual endpoints separately"""
+def test_internal_document_approval():
+    """Test that INTERNAL classified document is APPROVED"""
+    print("\nTesting INTERNAL document approval...")
+    
+    # Create test file that should be classified as INTERNAL
+    test_file = create_test_file("INTERNAL_document.pdf")
+    
+    files = {
+        'file': ('INTERNAL_document.pdf', test_file, 'application/pdf')
+    }
+    
     try:
-        from Application import app
-        client = TestClient(app)
-        
-        print("\n" + "="*50)
-        print("TESTING INDIVIDUAL ENDPOINTS")
-        print("="*50)
-        
-        # Test 1: Root endpoint
-        print("\n1. Testing root endpoint...")
-        root_response = client.get("/")
-        assert root_response.status_code == 200
-        print(f"✓ Root endpoint: {root_response.json()}")
-        
-        # Test 2: Health endpoint
-        print("\n2. Testing health endpoint...")
-        health_response = client.get("/extraction/health")
-        assert health_response.status_code == 200
-        print(f"✓ Health endpoint: {health_response.json()}")
-        
-        # Test 3: Session endpoint (will likely fail due to auth, but tests the endpoint)
-        print("\n3. Testing session endpoint structure...")
-        session_response = client.post("/extraction/session", headers={
-            "DCREST_JWT_TOKEN": "test-token",
-            "X_HSBC_Request_Correlation_Id": "test-id",
-            "azure_token": "test-azure"
-        })
-        print(f"Session endpoint status: {session_response.status_code}")
-        print("✓ Session endpoint is accessible")
-        
-        # Test 4: Upload endpoint structure
-        print("\n4. Testing upload endpoint structure...")
-        upload_response = client.post("/extraction/upload-file", 
-            headers={
-                "DCREST_JWT_TOKEN": "test-token",
-                "X_HSBC_Request_Correlation_Id": "test-id", 
-                "azure_token": "test-azure"
-            },
-            data={"session_token": "test-session"},
-            files={"files": ("test.txt", b"test content", "text/plain")}
+        response = requests.post(
+            BASE_URL + ENDPOINT,
+            headers=TEST_HEADERS,
+            files=files,
+            verify=False
         )
-        print(f"Upload endpoint status: {upload_response.status_code}")
-        print("✓ Upload endpoint is accessible")
         
-        print("\n✓ All endpoint structures are working correctly")
-        return True
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
         
+        # Should return True (200 status) for INTERNAL documents
+        if response.status_code == 200 and response.json() == True:
+            print("✓ INTERNAL document correctly APPROVED")
+            return True
+        else:
+            print("✗ INTERNAL document incorrectly REJECTED")
+            return False
+            
     except Exception as e:
-        print(f"Individual endpoint testing error: {e}")
+        print(f"✗ Test failed: {e}")
         return False
+
+def test_restricted_document_rejection():
+    """Test that RESTRICTED classified document is REJECTED"""
+    print("\nTesting RESTRICTED document rejection...")
+    
+    # Create test file that should be classified as RESTRICTED
+    test_file = create_test_file("RESTRICTED_document.pdf")
+    
+    files = {
+        'file': ('RESTRICTED_document.pdf', test_file, 'application/pdf')
+    }
+    
+    try:
+        response = requests.post(
+            BASE_URL + ENDPOINT,
+            headers=TEST_HEADERS,
+            files=files,
+            verify=False
+        )
+        
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
+        
+        # Should return 500 error for RESTRICTED documents
+        if response.status_code == 500:
+            error_detail = response.json().get("detail", "")
+            if "RESTRICTED" in error_detail and "classification level INTERNAL" in error_detail:
+                print("✓ RESTRICTED document correctly REJECTED")
+                return True
+        
+        print("✗ RESTRICTED document incorrectly APPROVED")
+        return False
+            
+    except Exception as e:
+        print(f"✗ Test failed: {e}")
+        return False
+
+def test_highly_restricted_document_rejection():
+    """Test that HIGHLY RESTRICTED classified document is REJECTED"""
+    print("\nTesting HIGHLY RESTRICTED document rejection...")
+    
+    # Create test file that should be classified as HIGHLY RESTRICTED
+    test_file = create_test_file("HIGHLY_RESTRICTED_document.pdf")
+    
+    files = {
+        'file': ('HIGHLY_RESTRICTED_document.pdf', test_file, 'application/pdf')
+    }
+    
+    try:
+        response = requests.post(
+            BASE_URL + ENDPOINT,
+            headers=TEST_HEADERS,
+            files=files,
+            verify=False
+        )
+        
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
+        
+        # Should return 500 error for HIGHLY RESTRICTED documents
+        if response.status_code == 500:
+            error_detail = response.json().get("detail", "")
+            if "HIGHLY RESTRICTED" in error_detail and "classification level INTERNAL" in error_detail:
+                print("✓ HIGHLY RESTRICTED document correctly REJECTED")
+                return True
+        
+        print("✗ HIGHLY RESTRICTED document incorrectly APPROVED")
+        return False
+            
+    except Exception as e:
+        print(f"✗ Test failed: {e}")
+        return False
+
+def test_unclassified_document_rejection():
+    """Test that UNCLASSIFIED document is REJECTED"""
+    print("\nTesting UNCLASSIFIED document rejection...")
+    
+    # Create test file that should be classified as UNCLASSIFIED
+    test_file = create_test_file("unclassified_document.pdf")
+    
+    files = {
+        'file': ('unclassified_document.pdf', test_file, 'application/pdf')
+    }
+    
+    try:
+        response = requests.post(
+            BASE_URL + ENDPOINT,
+            headers=TEST_HEADERS,
+            files=files,
+            verify=False
+        )
+        
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
+        
+        # Should return 500 error for UNCLASSIFIED documents
+        if response.status_code == 500:
+            error_detail = response.json().get("detail", "")
+            if "add a classification label" in error_detail and "PUBLIC, INTERNAL, RESTRICTED, HIGHLY RESTRICTED" in error_detail:
+                print("✓ UNCLASSIFIED document correctly REJECTED")
+                return True
+        
+        print("✗ UNCLASSIFIED document incorrectly APPROVED")
+        return False
+            
+    except Exception as e:
+        print(f"✗ Test failed: {e}")
+        return False
+
+def run_classification_tests():
+    """Run all document classification approval/rejection tests"""
+    print("=== Document Classification Approval/Rejection Tests ===")
+    print("Testing if endpoint correctly approves/rejects based on classification")
+    print(f"Endpoint: {BASE_URL + ENDPOINT}")
+    print()
+    
+    tests = [
+        ("APPROVE", test_public_document_approval),
+        ("APPROVE", test_internal_document_approval),
+        ("REJECT", test_restricted_document_rejection),
+        ("REJECT", test_highly_restricted_document_rejection),
+        ("REJECT", test_unclassified_document_rejection)
+    ]
+    
+    passed = 0
+    total = len(tests)
+    
+    for expected_result, test_func in tests:
+        print(f"Expected: {expected_result}")
+        try:
+            if test_func():
+                passed += 1
+        except Exception as e:
+            print(f"✗ Test {test_func.__name__} failed: {e}")
+        print("-" * 50)
+    
+    print(f"=== Classification Test Results ===")
+    print(f"Correctly Handled: {passed}/{total}")
+    print(f"Incorrectly Handled: {total - passed}/{total}")
+    
+    if passed == total:
+        print("🎉 All classifications working correctly!")
+        print("✓ Endpoint properly approves PUBLIC/INTERNAL documents")
+        print("✓ Endpoint properly rejects RESTRICTED/HIGHLY RESTRICTED/UNCLASSIFIED documents")
+    else:
+        print("⚠️  Classification logic has issues!")
+        print("Check if:")
+        print("- Content moderation service is returning correct classifications")
+        print("- Endpoint logic matches expected approval/rejection rules")
 
 if __name__ == "__main__":
-    print("="*50)
-    print("TESTING UPLOAD FUNCTIONALITY WITH TESTCLIENT")
-    print("="*50)
+    print("Before running tests, ensure:")
+    print("1. Update BASE_URL to your server")
+    print("2. Update TEST_HEADERS with valid tokens")
+    print("3. Content moderation service is running")
+    print("4. Test files trigger correct classifications")
+    print()
     
-    # Run main PVT test
-    result = PVT()
-    
-    # Run individual endpoint tests
-    individual_result = test_individual_endpoints()
-    
-    print("\n" + "="*50)
-    if result and individual_result:
-        print("OVERALL TEST RESULT: PASS")
-        print("✓ All upload functionality tests passed!")
-    elif result or individual_result:
-        print("OVERALL TEST RESULT: PARTIAL PASS")
-        print("✓ Some tests passed - check details above")
-    else:
-        print("OVERALL TEST RESULT: FAIL") 
-        print("✗ Tests failed - check errors above")
-    print("="*50)
+    run_classification_tests()
