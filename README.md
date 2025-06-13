@@ -1,9 +1,12 @@
 import requests
-from io import BytesIO
+import os
 
 # Test configuration
 BASE_URL = "http://localhost:6303"  # Update with your server URL
 ENDPOINT = "/dcrest/v1/idp/warden/check-classification"
+
+# Directory containing test files
+TEST_FILES_DIR = "./test_files"  # Update with your directory path
 
 # Test headers
 TEST_HEADERS = {
@@ -12,192 +15,119 @@ TEST_HEADERS = {
     "azure-token": "Bearer test.azure.token"  # Replace with valid Azure token
 }
 
-def create_test_file(filename="test_document.pdf"):
-    """Create a simple test file"""
-    file_content = b"Test document content for classification testing"
-    return BytesIO(file_content)
+# File mappings - update these with your actual file names
+TEST_FILES = {
+    "PUBLIC": "public_document.pdf",           # File that should be classified as PUBLIC
+    "INTERNAL": "internal_document.pdf",       # File that should be classified as INTERNAL  
+    "RESTRICTED": "restricted_document.pdf",   # File that should be classified as RESTRICTED
+    "HIGHLY_RESTRICTED": "highly_restricted_document.pdf",  # File classified as HIGHLY RESTRICTED
+    "UNCLASSIFIED": "unclassified_document.pdf"  # File that should be classified as UNCLASSIFIED
+}
+
+def test_file_classification(classification_type, filename, should_approve):
+    """Test file classification for approval/rejection"""
+    print(f"Testing {classification_type} document: {filename}")
+    
+    file_path = os.path.join(TEST_FILES_DIR, filename)
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        print(f"✗ File not found: {file_path}")
+        return False
+    
+    try:
+        with open(file_path, 'rb') as f:
+            files = {
+                'file': (filename, f, 'application/pdf')
+            }
+            
+            response = requests.post(
+                BASE_URL + ENDPOINT,
+                headers=TEST_HEADERS,
+                files=files,
+                verify=False
+            )
+        
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {response.text}")
+        
+        if should_approve:
+            # Should return True (200 status) for approved documents
+            if response.status_code == 200 and response.json() == True:
+                print(f"✓ {classification_type} document correctly APPROVED")
+                return True
+            else:
+                print(f"✗ {classification_type} document incorrectly REJECTED")
+                return False
+        else:
+            # Should return 500 error for rejected documents
+            if response.status_code == 500:
+                error_detail = response.json().get("detail", "")
+                print(f"✓ {classification_type} document correctly REJECTED: {error_detail}")
+                return True
+            else:
+                print(f"✗ {classification_type} document incorrectly APPROVED")
+                return False
+                
+    except Exception as e:
+        print(f"✗ Test failed: {e}")
+        return False
 
 def test_public_document_approval():
     """Test that PUBLIC classified document is APPROVED"""
-    print("Testing PUBLIC document approval...")
-    
-    # Create test file that should be classified as PUBLIC
-    test_file = create_test_file("PUBLIC_document.pdf")
-    
-    files = {
-        'file': ('PUBLIC_document.pdf', test_file, 'application/pdf')
-    }
-    
-    try:
-        response = requests.post(
-            BASE_URL + ENDPOINT,
-            headers=TEST_HEADERS,
-            files=files,
-            verify=False
-        )
-        
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-        
-        # Should return True (200 status) for PUBLIC documents
-        if response.status_code == 200 and response.json() == True:
-            print("✓ PUBLIC document correctly APPROVED")
-            return True
-        else:
-            print("✗ PUBLIC document incorrectly REJECTED")
-            return False
-            
-    except Exception as e:
-        print(f"✗ Test failed: {e}")
-        return False
+    return test_file_classification("PUBLIC", TEST_FILES["PUBLIC"], should_approve=True)
 
 def test_internal_document_approval():
     """Test that INTERNAL classified document is APPROVED"""
-    print("\nTesting INTERNAL document approval...")
-    
-    # Create test file that should be classified as INTERNAL
-    test_file = create_test_file("INTERNAL_document.pdf")
-    
-    files = {
-        'file': ('INTERNAL_document.pdf', test_file, 'application/pdf')
-    }
-    
-    try:
-        response = requests.post(
-            BASE_URL + ENDPOINT,
-            headers=TEST_HEADERS,
-            files=files,
-            verify=False
-        )
-        
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-        
-        # Should return True (200 status) for INTERNAL documents
-        if response.status_code == 200 and response.json() == True:
-            print("✓ INTERNAL document correctly APPROVED")
-            return True
-        else:
-            print("✗ INTERNAL document incorrectly REJECTED")
-            return False
-            
-    except Exception as e:
-        print(f"✗ Test failed: {e}")
-        return False
+    return test_file_classification("INTERNAL", TEST_FILES["INTERNAL"], should_approve=True)
 
 def test_restricted_document_rejection():
     """Test that RESTRICTED classified document is REJECTED"""
-    print("\nTesting RESTRICTED document rejection...")
-    
-    # Create test file that should be classified as RESTRICTED
-    test_file = create_test_file("RESTRICTED_document.pdf")
-    
-    files = {
-        'file': ('RESTRICTED_document.pdf', test_file, 'application/pdf')
-    }
-    
-    try:
-        response = requests.post(
-            BASE_URL + ENDPOINT,
-            headers=TEST_HEADERS,
-            files=files,
-            verify=False
-        )
-        
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-        
-        # Should return 500 error for RESTRICTED documents
-        if response.status_code == 500:
-            error_detail = response.json().get("detail", "")
-            if "RESTRICTED" in error_detail and "classification level INTERNAL" in error_detail:
-                print("✓ RESTRICTED document correctly REJECTED")
-                return True
-        
-        print("✗ RESTRICTED document incorrectly APPROVED")
-        return False
-            
-    except Exception as e:
-        print(f"✗ Test failed: {e}")
-        return False
+    return test_file_classification("RESTRICTED", TEST_FILES["RESTRICTED"], should_approve=False)
 
 def test_highly_restricted_document_rejection():
     """Test that HIGHLY RESTRICTED classified document is REJECTED"""
-    print("\nTesting HIGHLY RESTRICTED document rejection...")
-    
-    # Create test file that should be classified as HIGHLY RESTRICTED
-    test_file = create_test_file("HIGHLY_RESTRICTED_document.pdf")
-    
-    files = {
-        'file': ('HIGHLY_RESTRICTED_document.pdf', test_file, 'application/pdf')
-    }
-    
-    try:
-        response = requests.post(
-            BASE_URL + ENDPOINT,
-            headers=TEST_HEADERS,
-            files=files,
-            verify=False
-        )
-        
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-        
-        # Should return 500 error for HIGHLY RESTRICTED documents
-        if response.status_code == 500:
-            error_detail = response.json().get("detail", "")
-            if "HIGHLY RESTRICTED" in error_detail and "classification level INTERNAL" in error_detail:
-                print("✓ HIGHLY RESTRICTED document correctly REJECTED")
-                return True
-        
-        print("✗ HIGHLY RESTRICTED document incorrectly APPROVED")
-        return False
-            
-    except Exception as e:
-        print(f"✗ Test failed: {e}")
-        return False
+    return test_file_classification("HIGHLY_RESTRICTED", TEST_FILES["HIGHLY_RESTRICTED"], should_approve=False)
 
 def test_unclassified_document_rejection():
     """Test that UNCLASSIFIED document is REJECTED"""
-    print("\nTesting UNCLASSIFIED document rejection...")
+    return test_file_classification("UNCLASSIFIED", TEST_FILES["UNCLASSIFIED"], should_approve=False)
+
+def verify_test_files():
+    """Verify all required test files exist"""
+    print("Verifying test files exist...")
+    missing_files = []
     
-    # Create test file that should be classified as UNCLASSIFIED
-    test_file = create_test_file("unclassified_document.pdf")
+    for classification, filename in TEST_FILES.items():
+        file_path = os.path.join(TEST_FILES_DIR, filename)
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            print(f"✓ {classification}: {filename} ({file_size} bytes)")
+        else:
+            print(f"✗ {classification}: {filename} - NOT FOUND")
+            missing_files.append(filename)
     
-    files = {
-        'file': ('unclassified_document.pdf', test_file, 'application/pdf')
-    }
-    
-    try:
-        response = requests.post(
-            BASE_URL + ENDPOINT,
-            headers=TEST_HEADERS,
-            files=files,
-            verify=False
-        )
-        
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-        
-        # Should return 500 error for UNCLASSIFIED documents
-        if response.status_code == 500:
-            error_detail = response.json().get("detail", "")
-            if "add a classification label" in error_detail and "PUBLIC, INTERNAL, RESTRICTED, HIGHLY RESTRICTED" in error_detail:
-                print("✓ UNCLASSIFIED document correctly REJECTED")
-                return True
-        
-        print("✗ UNCLASSIFIED document incorrectly APPROVED")
+    if missing_files:
+        print(f"\nMissing files: {missing_files}")
+        print("Please ensure all test files are present before running tests.")
         return False
-            
-    except Exception as e:
-        print(f"✗ Test failed: {e}")
-        return False
+    
+    print("All test files found!")
+    return True
 
 def run_classification_tests():
     """Run all document classification approval/rejection tests"""
     print("=== Document Classification Approval/Rejection Tests ===")
-    print("Testing if endpoint correctly approves/rejects based on classification")
+    print(f"Test files directory: {TEST_FILES_DIR}")
     print(f"Endpoint: {BASE_URL + ENDPOINT}")
+    print()
+    
+    # First verify all files exist
+    if not verify_test_files():
+        return
+    
+    print("\n" + "="*60)
+    print("Starting classification tests...")
     print()
     
     tests = [
@@ -233,13 +163,32 @@ def run_classification_tests():
         print("Check if:")
         print("- Content moderation service is returning correct classifications")
         print("- Endpoint logic matches expected approval/rejection rules")
+        print("- Test files have correct classification labels/content")
+
+def list_available_files():
+    """List all files in the test directory"""
+    print(f"Files in {TEST_FILES_DIR}:")
+    if os.path.exists(TEST_FILES_DIR):
+        files = os.listdir(TEST_FILES_DIR)
+        for i, file in enumerate(files, 1):
+            file_path = os.path.join(TEST_FILES_DIR, file)
+            if os.path.isfile(file_path):
+                size = os.path.getsize(file_path)
+                print(f"{i}. {file} ({size} bytes)")
+    else:
+        print(f"Directory {TEST_FILES_DIR} does not exist!")
 
 if __name__ == "__main__":
     print("Before running tests, ensure:")
     print("1. Update BASE_URL to your server")
-    print("2. Update TEST_HEADERS with valid tokens")
-    print("3. Content moderation service is running")
-    print("4. Test files trigger correct classifications")
+    print("2. Update TEST_FILES_DIR to your files directory")
+    print("3. Update TEST_FILES mapping with your actual filenames")
+    print("4. Update TEST_HEADERS with valid tokens")
+    print("5. Content moderation service is running")
+    print()
+    
+    print("Available files:")
+    list_available_files()
     print()
     
     run_classification_tests()
