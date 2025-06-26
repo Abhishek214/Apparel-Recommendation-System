@@ -1,439 +1,512 @@
 #!/usr/bin/env python3
 """
-Documentary Credit Automation - Modified for Single Combined PDF
-Uses your SimpleLLMClient class for all LLM interactions
+Simple FastAPI for Prompt Optimization - Business Rule Verification
+No Pydantic, focused on prompt testing and optimization
 """
 
-import json
-import PyPDF2
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import tempfile
-from typing import Dict, List, Optional
+import os
+import json
+import httpx
+import asyncio
+from typing import Dict, List, Optional, Any
+import PyPDF2
 from pathlib import Path
 
-class DCAutomationSinglePDF:
-    def __init__(self, rag_service_url: str, app_id: str, azure_token: str):
-        """Initialize with your SimpleLLMClient parameters"""
-        # Import your SimpleLLMClient class here
-        from your_module import SimpleLLMClient  # Update with actual import
+# Your existing SimpleLLMClient class
+class SimpleLLMClient:
+    def __init__(self, rag_service_url: str, app_id: str):
+        self.rag_service_url = rag_service_url
+        self.app_id = app_id
+
+    async def ask_llm(
+        self,
+        azure_token: str,
+        prompt: str,
+        system_prompt: str = "You are an intelligent AI assistant",
+        model_type: str = "gpt-4o-mini",
+        temperature: float = 0.1,
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Send a simple prompt to LLM without document search"""
         
-        self.llm_client = SimpleLLMClient(
-            rag_service_url=rag_service_url,
-            app_id=app_id
-        )
-        self.azure_token = azure_token
-        self.system_prompt = "You are an expert Documentary Credit examiner with deep knowledge of UCP 600, ISBP guidelines, and trade finance regulations."
-    
-    def extract_pdf_text(self, pdf_path: str) -> str:
-        """Extract text from PDF file"""
         try:
-            with open(pdf_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n\n"
-                return text
+            headers = {
+                "accept": "application/json",
+                "Authorization": azure_token
+            }
+
+            json_data = {
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "model": model_type,
+                "temperature": temperature,
+                "search_type": "SEARCH",  # No document search
+                "use_tools": False,
+                "save_response": False,
+                "multimodal": False
+            }
+
+            if session_id:
+                json_data["session_id"] = session_id
+
+            url = f"{self.rag_service_url}/{self.app_id}"
+
+            async with httpx.AsyncClient(timeout=60, verify=False) as client:
+                response = await client.post(url, headers=headers, json=json_data)
+                response.raise_for_status()
+                return response.json()
+
         except Exception as e:
-            return f"Error extracting PDF: {str(e)}"
-    
-    def extract_mt700_rules(self, mt700_text: str) -> Dict:
-        """Extract business rules from MT700 using your LLM client"""
+            print(f"Error calling LLM: {e}")
+            return None
+
+def extract_pdf_text(pdf_path: str) -> str:
+    """Extract text from PDF file"""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n\n"
+            return text
+    except Exception as e:
+        return f"Error extracting PDF: {str(e)}"
+
+# FastAPI Application
+app = FastAPI(
+    title="Prompt Optimization API - Business Rule Verification",
+    description="Simple API for testing and optimizing prompts for business rule verification",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize LLM Client
+llm_client = SimpleLLMClient(
+    rag_service_url="https://hsbc-multi-dcrest-nonprod01-chat-service.azurewebsites.net/rag",
+    app_id="lydia"
+)
+
+@app.post("/extract-rules")
+async def extract_rules_from_mt700(request: dict):
+    """
+    Extract business rules from MT700 text
+    Simple endpoint for prompt optimization
+    """
+    try:
+        # Extract parameters from request
+        mt700_text = request.get("mt700_text", "")
+        azure_token = request.get("azure_token", "")
+        custom_prompt = request.get("custom_prompt", "")  # For prompt optimization
+        system_prompt = request.get("system_prompt", "You are an expert Documentary Credit examiner.")
+        temperature = request.get("temperature", 0.1)
         
-        prompt = f"""
-        Analyze this MT700 Documentary Credit message and extract business rules from fields 45A, 46A, and 47A.
+        if not mt700_text.strip():
+            return {"error": "MT700 text cannot be empty"}
+        
+        if not azure_token.strip():
+            return {"error": "Azure token is required"}
+        
+        # Use custom prompt if provided, otherwise use default
+        if custom_prompt:
+            prompt = custom_prompt.replace("{mt700_text}", mt700_text)
+        else:
+            # Default prompt
+            prompt = f"""
+            Analyze this MT700 Documentary Credit message and extract business rules.
 
-        MT700 Content:
-        {mt700_text}
+            MT700 Content:
+            {mt700_text}
 
-        Tasks:
-        1. Extract the 47A: Additional Conditions section
-        2. Convert each condition into specific, numbered business rules
-        3. Extract other relevant DC information (59, 58A, etc.)
-        4. Categorize rules by document type and requirement type
-
-        Output as valid JSON:
-        {{
-            "extracted_fields": {{
-                "45A": "description of goods text...",
-                "46A": "documents required text...", 
-                "47A": "additional conditions text..."
-            }},
-            "business_rules": [
-                {{
-                    "rule_id": 1,
-                    "rule_text": "Clear, specific requirement statement",
-                    "document_type": "All Documents" or "Bill of Lading" or "Commercial Invoice" etc,
-                    "requirement_type": "exact_match" or "contains" or "tolerance_check" or "presence_check",
-                    "field_name": "beneficiary_address" or "quantity" etc,
-                    "expected_value": "specific value to check for or null",
-                    "validation_note": "additional context for validation"
+            Extract and return as JSON:
+            {{
+                "business_rules": [
+                    {{
+                        "rule_id": 1,
+                        "rule_text": "specific requirement",
+                        "document_type": "document type to check",
+                        "requirement_type": "exact_match/contains/presence_check",
+                        "expected_value": "value to look for"
+                    }}
+                ],
+                "dc_metadata": {{
+                    "dc_number": "from field 20",
+                    "beneficiary": "from field 59", 
+                    "applicant": "from field 50"
                 }}
-            ],
-            "dc_metadata": {{
-                "dc_number": "extracted from field 20",
-                "beneficiary": "extracted from field 59",
-                "applicant": "extracted from field 50",
-                "amount": "extracted from field 32B",
-                "expiry_date": "extracted from field 31D",
-                "latest_shipment": "extracted from field 44C"
             }}
-        }}
-
-        Make each rule specific and actionable for document verification.
-        Ensure all JSON is properly formatted and valid.
-        """
+            """
         
+        # Call LLM
+        response = await llm_client.ask_llm(
+            azure_token=azure_token,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature
+        )
+        
+        if not response:
+            return {"error": "No response from LLM service"}
+        
+        # Try to extract JSON from response
+        response_text = response.get("response", "") if isinstance(response, dict) else str(response)
+        
+        # Find JSON in response
+        start_idx = response_text.find("{")
+        end_idx = response_text.rfind("}") + 1
+        
+        result = {
+            "status": "success",
+            "raw_response": response_text,
+            "prompt_used": prompt,
+            "system_prompt_used": system_prompt,
+            "temperature_used": temperature
+        }
+        
+        if start_idx != -1 and end_idx != -1:
+            try:
+                json_str = response_text[start_idx:end_idx]
+                parsed_json = json.loads(json_str)
+                result["parsed_result"] = parsed_json
+                result["rules_count"] = len(parsed_json.get("business_rules", []))
+            except json.JSONDecodeError:
+                result["parsing_error"] = "Failed to parse JSON from response"
+        else:
+            result["parsing_error"] = "No JSON found in response"
+        
+        return result
+        
+    except Exception as e:
+        return {"error": f"Internal server error: {str(e)}"}
+
+@app.post("/test-prompt")
+async def test_prompt_for_verification(
+    documents: UploadFile = File(...),
+    business_rules: str = Form(...),
+    custom_prompt: str = Form(...),
+    azure_token: str = Form(...),
+    system_prompt: str = Form("You are an expert Documentary Credit examiner."),
+    temperature: float = Form(0.1),
+    model_type: str = Form("gpt-4o-mini")
+):
+    """
+    Test custom prompts for verifying business rules against documents
+    Main endpoint for prompt optimization
+    """
+    temp_pdf_path = None
+    
+    try:
+        # Validate inputs
+        if not azure_token.strip():
+            return {"error": "Azure token is required"}
+        
+        if not custom_prompt.strip():
+            return {"error": "Custom prompt is required"}
+        
+        if not documents.filename.lower().endswith('.pdf'):
+            return {"error": "File must be a PDF"}
+        
+        # Parse business rules
         try:
-            response = self.llm_client.ask_llm(
-                azure_token=self.azure_token,
-                prompt=prompt,
-                system_prompt=self.system_prompt,
-                model_type="gpt-4o-mini",
-                temperature=0.1
+            rules_list = json.loads(business_rules)
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON format for business rules"}
+        
+        # Save uploaded PDF and extract text
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            content = await documents.read()
+            temp_file.write(content)
+            temp_pdf_path = temp_file.name
+        
+        # Extract text from PDF
+        document_text = extract_pdf_text(temp_pdf_path)
+        
+        if document_text.startswith("Error"):
+            return {"error": f"PDF extraction failed: {document_text}"}
+        
+        # Replace placeholders in custom prompt
+        final_prompt = custom_prompt
+        final_prompt = final_prompt.replace("{business_rules}", json.dumps(rules_list, indent=2))
+        final_prompt = final_prompt.replace("{documents}", document_text)
+        final_prompt = final_prompt.replace("{document_text}", document_text)
+        
+        # Call LLM with custom prompt
+        response = await llm_client.ask_llm(
+            azure_token=azure_token,
+            prompt=final_prompt,
+            system_prompt=system_prompt,
+            model_type=model_type,
+            temperature=temperature
+        )
+        
+        if not response:
+            return {"error": "No response from LLM service"}
+        
+        # Extract response text
+        response_text = response.get("response", "") if isinstance(response, dict) else str(response)
+        
+        # Try to parse JSON if present
+        start_idx = response_text.find("{")
+        end_idx = response_text.rfind("}") + 1
+        
+        result = {
+            "status": "success",
+            "raw_response": response_text,
+            "prompt_used": final_prompt,
+            "system_prompt_used": system_prompt,
+            "temperature_used": temperature,
+            "model_used": model_type,
+            "document_length": len(document_text),
+            "rules_provided": len(rules_list)
+        }
+        
+        if start_idx != -1 and end_idx != -1:
+            try:
+                json_str = response_text[start_idx:end_idx]
+                parsed_json = json.loads(json_str)
+                result["parsed_result"] = parsed_json
+                
+                # Add some analysis metrics
+                if "verification_results" in parsed_json:
+                    verification_results = parsed_json["verification_results"]
+                    result["analysis_metrics"] = {
+                        "total_rules_checked": len(verification_results),
+                        "rules_passed": len([r for r in verification_results if r.get("verification_result") == "Passed"]),
+                        "rules_need_review": len([r for r in verification_results if r.get("verification_result") == "Need Review"]),
+                        "overall_compliance": parsed_json.get("overall_compliance", "Unknown")
+                    }
+                    
+            except json.JSONDecodeError:
+                result["parsing_error"] = "Failed to parse JSON from response"
+        else:
+            result["parsing_error"] = "No JSON found in response"
+        
+        return result
+        
+    except Exception as e:
+        return {"error": f"Internal server error: {str(e)}"}
+    
+    finally:
+        # Clean up temporary file
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.unlink(temp_pdf_path)
+
+@app.post("/compare-prompts")
+async def compare_multiple_prompts(
+    documents: UploadFile = File(...),
+    business_rules: str = Form(...),
+    prompts: str = Form(...),  # JSON array of prompts to test
+    azure_token: str = Form(...),
+    system_prompt: str = Form("You are an expert Documentary Credit examiner."),
+    temperature: float = Form(0.1)
+):
+    """
+    Compare multiple prompts side by side for optimization
+    """
+    temp_pdf_path = None
+    
+    try:
+        # Parse inputs
+        try:
+            rules_list = json.loads(business_rules)
+            prompts_list = json.loads(prompts)
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON format"}
+        
+        if not isinstance(prompts_list, list):
+            return {"error": "Prompts must be a list"}
+        
+        # Extract document text
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            content = await documents.read()
+            temp_file.write(content)
+            temp_pdf_path = temp_file.name
+        
+        document_text = extract_pdf_text(temp_pdf_path)
+        
+        if document_text.startswith("Error"):
+            return {"error": f"PDF extraction failed: {document_text}"}
+        
+        # Test each prompt
+        results = []
+        
+        for i, prompt_template in enumerate(prompts_list):
+            # Replace placeholders
+            final_prompt = prompt_template
+            final_prompt = final_prompt.replace("{business_rules}", json.dumps(rules_list, indent=2))
+            final_prompt = final_prompt.replace("{documents}", document_text)
+            final_prompt = final_prompt.replace("{document_text}", document_text)
+            
+            # Call LLM
+            response = await llm_client.ask_llm(
+                azure_token=azure_token,
+                prompt=final_prompt,
+                system_prompt=system_prompt,
+                temperature=temperature
             )
             
-            # Extract JSON from response if it's wrapped in text
-            response_text = response.get("response", "") if isinstance(response, dict) else str(response)
+            response_text = response.get("response", "") if response else "No response"
             
-            # Try to find JSON in the response
+            # Try to parse JSON
+            parsed_result = None
             start_idx = response_text.find("{")
             end_idx = response_text.rfind("}") + 1
             
             if start_idx != -1 and end_idx != -1:
-                json_str = response_text[start_idx:end_idx]
-                return json.loads(json_str)
-            else:
-                return {"error": "No valid JSON found in response", "raw_response": response_text}
-                
-        except Exception as e:
-            return {"error": f"Failed to extract rules: {str(e)}", "raw_response": response}
+                try:
+                    json_str = response_text[start_idx:end_idx]
+                    parsed_result = json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+            
+            results.append({
+                "prompt_index": i + 1,
+                "prompt_template": prompt_template,
+                "final_prompt": final_prompt,
+                "raw_response": response_text,
+                "parsed_result": parsed_result,
+                "response_length": len(response_text),
+                "json_parseable": parsed_result is not None
+            })
+        
+        return {
+            "status": "success",
+            "comparison_results": results,
+            "total_prompts_tested": len(prompts_list),
+            "document_length": len(document_text),
+            "rules_count": len(rules_list)
+        }
+        
+    except Exception as e:
+        return {"error": f"Internal server error: {str(e)}"}
     
-    def analyze_combined_documents(self, combined_pdf_text: str, business_rules: List[Dict]) -> Dict:
-        """Analyze single combined PDF containing all trade documents"""
-        
-        # First, identify and separate different documents within the combined PDF
-        document_separation_prompt = f"""
-        This is a combined PDF containing multiple trade documents for a Documentary Credit transaction.
-        Please identify and separate the different documents.
+    finally:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.unlink(temp_pdf_path)
 
-        Combined Document Text:
-        {combined_pdf_text}
+@app.get("/sample-prompts")
+async def get_sample_prompts():
+    """
+    Get sample prompts for testing and optimization
+    """
+    return {
+        "rule_extraction_prompts": [
+            {
+                "name": "basic_extraction",
+                "prompt": """Analyze this MT700 and extract business rules as JSON:
+{mt700_text}
 
-        Tasks:
-        1. Identify the different document types (e.g., Bill of Lading, Commercial Invoice, Packing List, Certificate of Origin, etc.)
-        2. Extract the content for each document type
-        3. Provide the extracted content for each document
+Return: {{"business_rules": [list], "dc_metadata": {{}}}}"""
+            },
+            {
+                "name": "detailed_extraction", 
+                "prompt": """You are a Documentary Credit expert. Analyze this MT700 message and extract specific business rules from field 47A:
 
-        Output as JSON:
-        {{
-            "identified_documents": [
-                {{
-                    "document_type": "Bill of Lading",
-                    "document_content": "extracted content for this document...",
-                    "page_reference": "approximate location/page in combined PDF"
-                }},
-                {{
-                    "document_type": "Commercial Invoice", 
-                    "document_content": "extracted content for this document...",
-                    "page_reference": "approximate location/page in combined PDF"
-                }}
-            ],
-            "total_documents_found": 3,
-            "extraction_notes": "any issues or observations during extraction"
-        }}
-        """
-        
-        try:
-            # Step 1: Separate documents
-            separation_response = self.llm_client.ask_llm(
-                azure_token=self.azure_token,
-                prompt=document_separation_prompt,
-                system_prompt=self.system_prompt,
-                model_type="gpt-4o-mini",
-                temperature=0.1
-            )
-            
-            # Parse separation response
-            sep_text = separation_response.get("response", "") if isinstance(separation_response, dict) else str(separation_response)
-            start_idx = sep_text.find("{")
-            end_idx = sep_text.rfind("}") + 1
-            
-            if start_idx != -1 and end_idx != -1:
-                json_str = sep_text[start_idx:end_idx]
-                separated_docs = json.loads(json_str)
-            else:
-                # Fallback: treat entire content as single document set
-                separated_docs = {
-                    "identified_documents": [
-                        {"document_type": "Combined Documents", "document_content": combined_pdf_text}
-                    ]
-                }
-            
-            # Step 2: Verify against business rules
-            verification_prompt = f"""
-            As a Documentary Credit examiner, verify these trade documents against the specified business rules.
+{mt700_text}
 
-            BUSINESS RULES TO CHECK:
-            {json.dumps(business_rules, indent=2)}
+For each condition in 47A, create a specific rule with:
+- rule_text: exact requirement
+- document_type: which documents to check
+- requirement_type: how to verify
+- expected_value: what to look for
 
-            IDENTIFIED TRADE DOCUMENTS:
-            {json.dumps(separated_docs.get('identified_documents', []), indent=2)}
-
-            For each business rule:
-            1. Check if the relevant document(s) contain the required information
-            2. Verify if values match expected requirements
-            3. Provide specific evidence from the documents
-            4. Determine Pass/Fail status with detailed reasoning
-
-            Output as JSON:
-            {{
-                "document_summary": {{
-                    "total_documents": {len(separated_docs.get('identified_documents', []))},
-                    "document_types": ["list of document types found"]
-                }},
-                "verification_results": [
-                    {{
-                        "rule_id": 1,
-                        "rule_text": "the business rule being checked",
-                        "verification_result": "Passed" or "Need Review",
-                        "verification_reasoning": "detailed explanation with specific evidence or why it failed",
-                        "evidence_found": "exact text/data found in documents or null if not found",
-                        "document_source": "which specific document(s) contained the evidence",
-                        "confidence_level": "High" or "Medium" or "Low"
-                    }}
-                ],
-                "overall_compliance": "Passed" or "Need Review",
-                "compliance_summary": {{
-                    "rules_passed": 0,
-                    "rules_failed": 0,
-                    "rules_need_review": 0
-                }},
-                "discrepancies": [
-                    {{
-                        "rule_id": 1,
-                        "issue_description": "clear description of the problem",
-                        "severity": "Major" or "Minor",
-                        "suggested_action": "recommendation for resolving the issue"
-                    }}
-                ]
-            }}
-            """
-            
-            verification_response = self.llm_client.ask_llm(
-                azure_token=self.azure_token,
-                prompt=verification_prompt,
-                system_prompt=self.system_prompt,
-                model_type="gpt-4o-mini",
-                temperature=0.1
-            )
-            
-            # Parse verification response
-            ver_text = verification_response.get("response", "") if isinstance(verification_response, dict) else str(verification_response)
-            start_idx = ver_text.find("{")
-            end_idx = ver_text.rfind("}") + 1
-            
-            if start_idx != -1 and end_idx != -1:
-                json_str = ver_text[start_idx:end_idx]
-                verification_result = json.loads(json_str)
-                verification_result["separated_documents"] = separated_docs
-                return verification_result
-            else:
-                return {"error": "Failed to parse verification response", "raw_response": ver_text}
-                
-        except Exception as e:
-            return {"error": f"Failed to analyze documents: {str(e)}", "raw_response": str(separation_response)}
-    
-    def generate_compliance_report(self, verification_results: Dict, dc_metadata: Dict) -> str:
-        """Generate final compliance report"""
-        
-        prompt = f"""
-        Generate a comprehensive, professional Documentary Credit examination report.
-
-        DC INFORMATION:
-        {json.dumps(dc_metadata, indent=2)}
-
-        VERIFICATION RESULTS:
-        {json.dumps(verification_results, indent=2)}
-
-        Create a detailed report with:
-        1. EXECUTIVE SUMMARY (overall status and key findings)
-        2. DOCUMENTARY CREDIT DETAILS (DC number, parties, amount, etc.)
-        3. DOCUMENTS EXAMINED (list of documents found and analyzed)
-        4. COMPLIANCE EXAMINATION RESULTS 
-           - Rules that passed (✓)
-           - Discrepancies identified (⚠)
-           - Detailed findings for each rule
-        5. DISCREPANCY ANALYSIS (if any)
-           - Major vs Minor issues
-           - Impact assessment
-           - Evidence from documents
-        6. RECOMMENDATION (Accept/Reject/Request Waiver)
-        7. NEXT STEPS
-        8. CHARGES (if applicable per DC terms)
-
-        Use professional banking language, clear formatting, and provide specific evidence for all findings.
-        The report should be suitable for bank management review and customer communication.
-        """
-        
-        try:
-            response = self.llm_client.ask_llm(
-                azure_token=self.azure_token,
-                prompt=prompt,
-                system_prompt=self.system_prompt,
-                model_type="gpt-4o-mini",
-                temperature=0.2
-            )
-            
-            return response.get("response", "") if isinstance(response, dict) else str(response)
-            
-        except Exception as e:
-            return f"Error generating report: {str(e)}"
-    
-    def process_documentary_credit(self, mt700_pdf_path: str, combined_documents_pdf_path: str) -> Dict:
-        """Main method to process complete DC automation"""
-        
-        try:
-            # Step 1: Extract text from PDFs
-            print("📄 Extracting MT700 text...")
-            mt700_text = self.extract_pdf_text(mt700_pdf_path)
-            
-            print("📄 Extracting combined documents text...")
-            combined_docs_text = self.extract_pdf_text(combined_documents_pdf_path)
-            
-            # Step 2: Extract business rules from MT700
-            print("🔍 Extracting business rules from MT700...")
-            rules_data = self.extract_mt700_rules(mt700_text)
-            
-            if "error" in rules_data:
-                return {"status": "error", "message": rules_data["error"], "step": "rule_extraction"}
-            
-            business_rules = rules_data.get("business_rules", [])
-            dc_metadata = rules_data.get("dc_metadata", {})
-            
-            print(f"✅ Extracted {len(business_rules)} business rules")
-            
-            # Step 3: Analyze combined documents against rules
-            print("📋 Analyzing documents against business rules...")
-            verification_results = self.analyze_combined_documents(combined_docs_text, business_rules)
-            
-            if "error" in verification_results:
-                return {"status": "error", "message": verification_results["error"], "step": "document_verification"}
-            
-            # Step 4: Generate final compliance report
-            print("📊 Generating compliance report...")
-            final_report = self.generate_compliance_report(verification_results, dc_metadata)
-            
-            # Step 5: Compile final results
-            final_results = {
-                "status": "success",
-                "processing_summary": {
-                    "mt700_processed": True,
-                    "rules_extracted": len(business_rules),
-                    "documents_analyzed": verification_results.get("document_summary", {}).get("total_documents", 0),
-                    "overall_compliance": verification_results.get("overall_compliance", "Unknown")
-                },
-                "dc_information": dc_metadata,
-                "extracted_rules": business_rules,
-                "verification_results": verification_results,
-                "final_report": final_report,
-                "discrepancies_summary": {
-                    "total_discrepancies": len(verification_results.get("discrepancies", [])),
-                    "major_issues": len([d for d in verification_results.get("discrepancies", []) if d.get("severity") == "Major"]),
-                    "minor_issues": len([d for d in verification_results.get("discrepancies", []) if d.get("severity") == "Minor"])
-                }
+Return as JSON with business_rules array and dc_metadata object."""
             }
-            
-            print("✅ Documentary Credit processing completed!")
-            return final_results
-            
-        except Exception as e:
-            return {
-                "status": "error", 
-                "message": f"Unexpected error: {str(e)}", 
-                "step": "processing"
+        ],
+        "verification_prompts": [
+            {
+                "name": "basic_verification",
+                "prompt": """Check these documents against the business rules:
+
+RULES: {business_rules}
+DOCUMENTS: {documents}
+
+Return JSON with verification_results array."""
+            },
+            {
+                "name": "detailed_verification",
+                "prompt": """As a Documentary Credit examiner, verify these trade documents against business rules:
+
+BUSINESS RULES TO CHECK:
+{business_rules}
+
+DOCUMENTS TO ANALYZE:
+{documents}
+
+For each rule:
+1. Check if documents contain required information
+2. Verify values match requirements  
+3. Provide specific evidence
+4. Return "Passed" or "Need Review"
+
+Output JSON:
+{{
+  "verification_results": [
+    {{
+      "rule_id": 1,
+      "verification_result": "Passed/Need Review", 
+      "verification_reasoning": "detailed explanation",
+      "evidence_found": "exact text or null"
+    }}
+  ],
+  "overall_compliance": "Passed/Need Review",
+  "discrepancies": []
+}}"""
+            },
+            {
+                "name": "conservative_verification",
+                "prompt": """CONSERVATIVE APPROACH: Flag any uncertain items for review.
+
+Check documents against rules and be strict about compliance:
+
+RULES: {business_rules}
+DOCUMENTS: {documents}
+
+- Use "Passed" only when completely certain
+- Use "Need Review" for any ambiguity
+- Provide specific evidence quotes
+- Classify discrepancies as Major/Minor
+
+Return detailed JSON verification results."""
             }
+        ]
+    }
 
-# Usage Example
-def main():
-    """Example usage with your LLM client"""
-    
-    # Initialize with your Azure/LLM service details
-    dc_processor = DCAutomationSinglePDF(
-        rag_service_url="https://hsbc-multi-dcrest-nonprod01-chat-service.azurewebsites.net/rag",
-        app_id="lydia",  # or your actual app_id
-        azure_token="your_azure_token_here"
-    )
-    
-    # Process documentary credit
-    results = dc_processor.process_documentary_credit(
-        mt700_pdf_path="path/to/mt700.pdf",
-        combined_documents_pdf_path="path/to/combined_trade_documents.pdf"
-    )
-    
-    if results["status"] == "success":
-        print("\n=== PROCESSING SUMMARY ===")
-        print(f"Rules Extracted: {results['processing_summary']['rules_extracted']}")
-        print(f"Documents Analyzed: {results['processing_summary']['documents_analyzed']}")
-        print(f"Overall Compliance: {results['processing_summary']['overall_compliance']}")
-        print(f"Total Discrepancies: {results['discrepancies_summary']['total_discrepancies']}")
-        
-        print("\n=== FINAL REPORT ===")
-        print(results["final_report"])
-        
-        # Save results to file
-        with open("dc_processing_results.json", "w") as f:
-            json.dump(results, f, indent=2)
-        
-    else:
-        print(f"Error: {results['message']} at step: {results['step']}")
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "message": "Prompt Optimization API is running"}
 
-# FastAPI Integration (optional)
-def create_fastapi_app():
-    """Create FastAPI app for DC automation service"""
-    from fastapi import FastAPI, UploadFile, File, Form
-    from fastapi.responses import JSONResponse
-    
-    app = FastAPI(title="DC Automation Service - Single PDF")
-    
-    @app.post("/process-dc-single-pdf")
-    async def process_dc_single_pdf(
-        mt700: UploadFile = File(...),
-        combined_documents: UploadFile = File(...),
-        azure_token: str = Form(...)
-    ):
-        try:
-            # Save uploaded files temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as mt700_file:
-                mt700_content = await mt700.read()
-                mt700_file.write(mt700_content)
-                mt700_path = mt700_file.name
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as docs_file:
-                docs_content = await combined_documents.read()
-                docs_file.write(docs_content)
-                docs_path = docs_file.name
-            
-            # Process with DC automation
-            dc_processor = DCAutomationSinglePDF(
-                rag_service_url="https://hsbc-multi-dcrest-nonprod01-chat-service.azurewebsites.net/rag",
-                app_id="lydia",
-                azure_token=azure_token
-            )
-            
-            results = dc_processor.process_documentary_credit(mt700_path, docs_path)
-            
-            # Clean up temp files
-            Path(mt700_path).unlink()
-            Path(docs_path).unlink()
-            
-            return JSONResponse(results)
-            
-        except Exception as e:
-            return JSONResponse({
-                "status": "error",
-                "message": f"API error: {str(e)}"
-            }, status_code=500)
-    
-    return app
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "Prompt Optimization API for Business Rule Verification",
+        "version": "1.0.0",
+        "endpoints": {
+            "extract_rules": "/extract-rules - Test prompts for rule extraction",
+            "test_prompt": "/test-prompt - Test custom verification prompts", 
+            "compare_prompts": "/compare-prompts - Compare multiple prompts",
+            "sample_prompts": "/sample-prompts - Get sample prompts",
+            "health": "/health",
+            "docs": "/docs"
+        },
+        "usage": "Upload documents and test different prompts to optimize accuracy"
+    }
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
