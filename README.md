@@ -1,304 +1,225 @@
 #!/usr/bin/env python3
 """
-Simple DC Automation with RAG - Document Upload and RAG Search
+Simple RAG Client - Basic document upload and search functionality
 """
 
-import os
 import json
-import tempfile
-from typing import Dict, List, Optional, Literal
-from pathlib import Path
+import time
+import httpx
+import asyncio
+from typing import Dict, List, Optional, Any, Literal
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
-from simple_rag_client import SimpleRAGClient
-from simple_utils import extract_pdf_text, extract_mt700_rules_rag, analyze_documents_rag
-
-# Configuration
-RAG_SERVICE_URL = "https://hsbc-multi-dcrest-nonprod01-chat-service.azurewebsites.net/rag"
-DOCUMENT_UPLOADER_URL = "https://hsbc-multi-dcrest-nonprod01-ingest-service.azurewebsites.net/ingest"
-INGEST_STATUS_URL = "https://hsbc-multi-dcrest-nonprod01-ingest-service.azurewebsites.net/ingest"
-APP_ID = "lydia"
-
-# Initialize RAG client
-rag_client = SimpleRAGClient(
-    rag_service_url=RAG_SERVICE_URL,
-    document_uploader_url=DOCUMENT_UPLOADER_URL,
-    ingest_status_url=INGEST_STATUS_URL,
-    app_id=APP_ID
-)
-
-# FastAPI Application
-app = FastAPI(
-    title="DC Automation with RAG",
-    description="Simple Documentary Credit automation with RAG capabilities",
-    version="1.0.0"
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.post("/upload-document")
-async def upload_document(
-    file: UploadFile = File(...),
-    azure_token: str = Form(...),
-    multimodal: bool = Form(default=True),
-    chunking_strategy: Literal["BY_PAGE", "BY_SECTION", "BY_PARAGRAPH", "SEMANTIC"] = Form(default="BY_PAGE")
-):
-    """Upload document and process with RAG indexing"""
-    temp_file_path = None
+class SimpleRAGClient:
+    """Simple RAG client for document processing and search"""
     
-    try:
-        # Validate file type
-        allowed_extensions = [".pdf", ".docx", ".txt", ".jpg", ".jpeg", ".png"]
-        file_extension = Path(file.filename).suffix.lower()
+    def __init__(self, rag_service_url: str, document_uploader_url: str, ingest_status_url: str, app_id: str):
+        self.rag_service_url = rag_service_url
+        self.document_uploader_url = document_uploader_url
+        self.ingest_status_url = ingest_status_url
+        self.app_id = app_id
+        self.timeout = 120
+    
+    async def upload_document(
+        self,
+        file_path: str,
+        file_name: str,
+        azure_token: str,
+        multimodal: bool = True,
+        chunking_strategy: Literal["BY_PAGE", "BY_SECTION", "BY_PARAGRAPH", "SEMANTIC"] = "BY_PAGE"
+    ) -> Optional[Dict[str, Any]]:
+        """Upload document with specified chunking strategy"""
         
-        if file_extension not in allowed_extensions:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
+        headers = {
+            "accept": "application/json",
+            "Authorization": azure_token
+        }
         
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-            content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
+        extension = file_name.split(".")[-1].lower()
         
-        # Upload document
-        result = await rag_client.upload_document(
-            file_path=temp_file_path,
-            file_name=file.filename,
-            azure_token=azure_token,
-            multimodal=multimodal,
-            chunking_strategy=chunking_strategy
-        )
+        # Generate a simple session ID for this upload
+        session_id = f"dc_auto_{int(time.time())}"
         
-        if not result or "documentID" not in result:
-            raise HTTPException(status_code=500, detail="Document upload failed")
-        
-        return {
-            "status": "success",
-            "document_id": result["documentID"],
-            "filename": file.filename,
-            "chunking_strategy": chunking_strategy,
+        querystring = {
+            "title": file_name,
+            "classification": "PUBLIC",
+            "extension": extension,
+            "session_id": session_id,
+            "save_document_blob": False,
+            "save_document_metadata": False,
+            "is_universal_document": False,
             "multimodal": multimodal,
-            "message": "Document uploaded and indexed successfully"
+            "chunk_method": chunking_strategy,
         }
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)
-
-@app.get("/document-status/{document_id}")
-async def get_document_status(
-    document_id: str,
-    azure_token: str = Header()
-):
-    """Check document processing status"""
-    try:
-        status = await rag_client.get_document_status(document_id, azure_token)
-        return {
-            "document_id": document_id,
-            "status": status
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
-
-@app.post("/search-documents")
-async def search_documents(
-    query: str = Form(...),
-    document_id: str = Form(...),
-    azure_token: str = Form(...),
-    max_documents: int = Form(default=10),
-    multimodal: bool = Form(default=False),
-    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = Form(default="SEARCH")
-):
-    """Search documents using RAG"""
-    try:
-        result = await rag_client.search_documents(
-            query=query,
-            document_id=document_id,
-            azure_token=azure_token,
-            max_documents=max_documents,
-            multimodal=multimodal,
-            search_type=search_type
-        )
-        
-        if not result:
-            raise HTTPException(status_code=500, detail="Search failed")
-        
-        return {
-            "status": "success",
-            "query": query,
-            "answer": result.get("response", ""),
-            "documents_found": len(result.get("documents_used", [])),
-            "document_content": result.get("document_content", ""),
-            "documents_used": result.get("documents_used", [])
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
-@app.post("/extract-rules")
-async def extract_rules_from_mt700(
-    mt700_text: str = Form(...),
-    document_id: str = Form(...),
-    azure_token: str = Form(...),
-    use_rag: bool = Form(default=True),
-    custom_prompt: str = Form(default="")
-):
-    """Extract business rules from MT700 with RAG enhancement"""
-    try:
-        result = await extract_mt700_rules_rag(
-            rag_client=rag_client,
-            mt700_text=mt700_text,
-            document_id=document_id,
-            azure_token=azure_token,
-            use_rag=use_rag,
-            custom_prompt=custom_prompt if custom_prompt.strip() else None
-        )
-        
-        if "error" in result:
-            return {"status": "error", "message": result["error"]}
-        
-        return {
-            "status": "success",
-            "extracted_fields": result.get("extracted_fields", {}),
-            "business_rules": result.get("business_rules", []),
-            "dc_metadata": result.get("dc_metadata", {}),
-            "rules_count": len(result.get("business_rules", [])),
-            "rag_used": use_rag
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Rule extraction failed: {str(e)}")
-
-@app.post("/analyze-documents")
-async def analyze_documents(
-    business_rules: str = Form(...),
-    document_id: str = Form(...),
-    azure_token: str = Form(...),
-    custom_prompt: str = Form(default=""),
-    multimodal: bool = Form(default=False),
-    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = Form(default="SEARCH")
-):
-    """Analyze documents against business rules using RAG"""
-    try:
-        # Parse business rules
         try:
-            rules_list = json.loads(business_rules)
-            if not isinstance(rules_list, list):
-                raise ValueError("Business rules must be a list")
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON format for business rules")
-        
-        result = await analyze_documents_rag(
-            rag_client=rag_client,
-            business_rules=rules_list,
-            document_id=document_id,
-            azure_token=azure_token,
-            custom_prompt=custom_prompt if custom_prompt.strip() else None,
-            multimodal=multimodal,
-            search_type=search_type
-        )
-        
-        if "error" in result:
-            return {"status": "error", "message": result["error"]}
-        
-        # Calculate simple metrics
-        verification_results = result.get("verification_results", [])
-        analysis_metrics = {}
-        if verification_results:
-            analysis_metrics = {
-                "total_rules_checked": len(verification_results),
-                "rules_passed": len([r for r in verification_results if r.get("verification_result") == "Passed"]),
-                "rules_need_review": len([r for r in verification_results if r.get("verification_result") == "Need Review"])
-            }
-        
-        return {
-            "status": "success",
-            "verification_results": verification_results,
-            "overall_compliance": result.get("overall_compliance", "Unknown"),
-            "discrepancies": result.get("discrepancies", []),
-            "analysis_metrics": analysis_metrics,
-            "rules_processed": len(rules_list)
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Document analysis failed: {str(e)}")
-
-@app.delete("/delete-document/{document_id}")
-async def delete_document(
-    document_id: str,
-    azure_token: str = Header()
-):
-    """Delete uploaded document"""
-    try:
-        success = await rag_client.delete_document(document_id, azure_token)
-        
-        if success:
-            return {"status": "deleted", "document_id": document_id}
-        else:
-            raise HTTPException(status_code=500, detail="Delete operation failed")
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
-
-@app.get("/chunking-strategies")
-async def get_chunking_strategies():
-    """Get available chunking strategies"""
-    strategies = [
-        {"name": "BY_PAGE", "description": "Chunk document by pages"},
-        {"name": "BY_SECTION", "description": "Chunk document by sections/headings"},
-        {"name": "BY_PARAGRAPH", "description": "Chunk document by paragraphs"},
-        {"name": "SEMANTIC", "description": "Semantic chunking based on content similarity"}
-    ]
+            url = f"{self.document_uploader_url}/{self.app_id}"
+            
+            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
+                with open(file_path, "rb") as file:
+                    files = {"file": (file_name, file, self._get_content_type(extension))}
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        files=files,
+                        params=querystring,
+                    )
+                
+                response.raise_for_status()
+                result = response.json()
+                # Add session_id to result for future queries
+                result["session_id"] = session_id
+                return result
+                
+        except Exception as e:
+            print(f"Document upload failed: {e}")
+            return None
     
-    return {"strategies": strategies, "default": "BY_PAGE"}
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "message": "DC Automation API with RAG is running",
-        "features": ["Document Upload", "RAG Search", "Rule Extraction", "Document Analysis"]
-    }
-
-@app.get("/")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "message": "DC Automation API with RAG",
-        "version": "1.0.0",
-        "description": "Simple Documentary Credit automation with RAG capabilities",
-        "workflow": {
-            "1": "Upload documents with /upload-document",
-            "2": "Check processing status with /document-status/{document_id}",
-            "3": "Search documents with /search-documents",
-            "4": "Extract rules with /extract-rules",
-            "5": "Analyze documents with /analyze-documents"
-        },
-        "endpoints": {
-            "upload": "/upload-document",
-            "status": "/document-status/{document_id}",
-            "search": "/search-documents", 
-            "extract": "/extract-rules",
-            "analyze": "/analyze-documents",
-            "delete": "/delete-document/{document_id}",
-            "strategies": "/chunking-strategies"
+    def _get_content_type(self, extension: str) -> str:
+        """Get content type based on file extension"""
+        content_types = {
+            "pdf": "application/pdf",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "txt": "text/plain",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png"
         }
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+        return content_types.get(extension, "application/octet-stream")
+    
+    async def get_document_status(self, document_id: str, azure_token: str) -> str:
+        """Get document processing status"""
+        try:
+            headers = {
+                "accept": "application/json",
+                "Authorization": azure_token
+            }
+            
+            params = {
+                "parent_document_id": document_id,
+                "paginate_output": "true",
+                "is_universal_document": "false",
+                "size": "50",
+            }
+            
+            url = f"{self.ingest_status_url}/{self.app_id}"
+            
+            async with httpx.AsyncClient(timeout=60, verify=False) as client:
+                response = await client.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                
+                if response.status_code != 200:
+                    return "FAILED"
+                
+                items = response.json().get("items", [])
+                if len(items) == 0:
+                    return "PENDING"
+                else:
+                    return items[0].get("ingest_status", "UNKNOWN")
+                    
+        except Exception as e:
+            print(f"Status check failed: {e}")
+            return "FAILED"
+    
+    async def search_documents(
+        self,
+        query: str,
+        document_id: str,
+        azure_token: str,
+        system_prompt: str = "You are an intelligent AI assistant",
+        model_type: str = "gpt-4o-mini",
+        temperature: float = 0.1,
+        max_documents: int = 10,
+        search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH",
+        multimodal: bool = False,
+        image_detail: Literal["low", "high"] = "low"
+    ) -> Optional[Dict[str, Any]]:
+        """Search documents using RAG"""
+        
+        headers = {
+            "accept": "application/json",
+            "Authorization": azure_token
+        }
+        
+        # Generate session ID from document ID for search context
+        session_id = f"search_{document_id}_{int(time.time())}"
+        
+        json_data = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            "model": model_type,
+            "encoding_model": "cl100k_base",
+            "embedding_model": "text-embedding-ada-002",
+            "temperature": temperature,
+            "vector_store_index": "lydia-embeddings-3",
+            "search_text": query,
+            "use_tools": False,
+            "max_number_of_documents": max_documents,
+            "search_universal": "false",
+            "save_response": "false",
+            "session_id": session_id,
+            "model_logprobs": 0,
+            "multimodal": multimodal,
+            "search_type": search_type,
+        }
+        
+        if multimodal:
+            json_data["image_detail"] = image_detail
+        
+        try:
+            url = f"{self.rag_service_url}/{self.app_id}"
+            
+            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
+                retry_count = 0
+                max_retries = 3
+                
+                while retry_count < max_retries:
+                    response = await client.post(url, headers=headers, json=json_data)
+                    
+                    if response.status_code == 429:
+                        # Rate limited, wait and retry
+                        await asyncio.sleep(2 ** retry_count)
+                        retry_count += 1
+                        continue
+                    
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    # Check if we got meaningful results
+                    document_content = result.get("document_content", "")
+                    if document_content or search_type != "SEARCH":
+                        return result
+                    
+                    # No meaningful results, retry
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        await asyncio.sleep(2)
+                
+                # Return even if no documents found
+                return result
+                
+        except Exception as e:
+            print(f"Document search failed: {e}")
+            return None
+    
+    async def delete_document(self, document_id: str, azure_token: str) -> bool:
+        """Delete document from the RAG system"""
+        try:
+            headers = {
+                "accept": "application/json",
+                "Authorization": azure_token
+            }
+            
+            querystring = {"parent_document_id": document_id}
+            delete_url = f"{self.document_uploader_url}/{self.app_id}"
+            
+            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
+                response = await client.delete(delete_url, headers=headers, params=querystring)
+                response.raise_for_status()
+                return response.status_code == 202
+                
+        except Exception as e:
+            print(f"Document deletion failed: {e}")
+            return False
