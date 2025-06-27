@@ -1,39 +1,7 @@
-#!/usr/bin/env python3
-"""
-Simple Auth Module - Basic JWT token validation
-"""
+Optimize these business rules to make them independent and actionable:
 
-import jwt
-from fastapi import HTTPException, status
-
-
-def auth(token: str) -> dict:
-    """
-    Simple auth function - validates JWT token
-    For demo purposes, you can either:
-    1. Implement actual JWT validation with your secret key
-    2. Return a mock user for testing
-    """
-    
-    try:
-        # For production, use actual JWT validation:
-        # SECRET_KEY = "your-secret-key"
-        # ALGORITHM = "HS256"
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        # return payload
-        
-        # For demo/testing purposes, return mock user:
-        if token:  # Just check if token exists
-            return {
-                "user": "demo_user",
-                "sub": "demo_subject",
-                "exp": 9999999999  # Far future expiry
-            }
-        else:
-            raise ValueError("No token provided")
-            
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-        )
+REQUIREMENTS:
+1. **Make each rule self-contained** - can be verified without depending on other rules
+2. **Clarify vague requirements** - add specific values, formats, and criteria
+3. **Add missing details** - include exact field names, expected values, tolerance ranges
+4. **Resolve interdependencies** - if rules reference each other, specify the relationship clearly
