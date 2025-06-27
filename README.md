@@ -1,225 +1,243 @@
 #!/usr/bin/env python3
 """
-Simple RAG Client - Basic document upload and search functionality
+Simple Utils - Basic business logic for DC automation with RAG
 """
 
 import json
-import time
-import httpx
-import asyncio
+import PyPDF2
 from typing import Dict, List, Optional, Any, Literal
+from simple_rag_client import SimpleRAGClient
 
 
-class SimpleRAGClient:
-    """Simple RAG client for document processing and search"""
+def extract_pdf_text(pdf_path: str) -> str:
+    """Extract text from PDF file"""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n\n"
+            return text
+    except Exception as e:
+        return f"Error extracting PDF: {str(e)}"
+
+
+def extract_json_from_response(response_text: str) -> Optional[Dict]:
+    """Extract JSON from LLM response text"""
+    try:
+        # Find JSON boundaries
+        start_idx = response_text.find("{")
+        end_idx = response_text.rfind("}") + 1
+        
+        if start_idx != -1 and end_idx != -1:
+            json_str = response_text[start_idx:end_idx]
+            return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
     
-    def __init__(self, rag_service_url: str, document_uploader_url: str, ingest_status_url: str, app_id: str):
-        self.rag_service_url = rag_service_url
-        self.document_uploader_url = document_uploader_url
-        self.ingest_status_url = ingest_status_url
-        self.app_id = app_id
-        self.timeout = 120
+    return None
+
+
+async def extract_mt700_rules_rag(
+    rag_client: SimpleRAGClient,
+    mt700_text: str,
+    document_id: str,
+    azure_token: str,
+    use_rag: bool = True,
+    custom_prompt: Optional[str] = None
+) -> Dict[str, Any]:
+    """Extract business rules from MT700 using RAG"""
     
-    async def upload_document(
-        self,
-        file_path: str,
-        file_name: str,
-        azure_token: str,
-        multimodal: bool = True,
-        chunking_strategy: Literal["BY_PAGE", "BY_SECTION", "BY_PARAGRAPH", "SEMANTIC"] = "BY_PAGE"
-    ) -> Optional[Dict[str, Any]]:
-        """Upload document with specified chunking strategy"""
-        
-        headers = {
-            "accept": "application/json",
-            "Authorization": azure_token
-        }
-        
-        extension = file_name.split(".")[-1].lower()
-        
-        # Generate a simple session ID for this upload
-        session_id = f"dc_auto_{int(time.time())}"
-        
-        querystring = {
-            "title": file_name,
-            "classification": "PUBLIC",
-            "extension": extension,
-            "session_id": session_id,
-            "save_document_blob": False,
-            "save_document_metadata": False,
-            "is_universal_document": False,
-            "multimodal": multimodal,
-            "chunk_method": chunking_strategy,
-        }
-        
-        try:
-            url = f"{self.document_uploader_url}/{self.app_id}"
-            
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
-                with open(file_path, "rb") as file:
-                    files = {"file": (file_name, file, self._get_content_type(extension))}
-                    response = await client.post(
-                        url,
-                        headers=headers,
-                        files=files,
-                        params=querystring,
-                    )
-                
-                response.raise_for_status()
-                result = response.json()
-                # Add session_id to result for future queries
-                result["session_id"] = session_id
-                return result
-                
-        except Exception as e:
-            print(f"Document upload failed: {e}")
-            return None
+    system_prompt = """You are an expert Documentary Credit examiner specializing in trade finance compliance.
     
-    def _get_content_type(self, extension: str) -> str:
-        """Get content type based on file extension"""
-        content_types = {
-            "pdf": "application/pdf",
-            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "txt": "text/plain",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "png": "image/png"
-        }
-        return content_types.get(extension, "application/octet-stream")
-    
-    async def get_document_status(self, document_id: str, azure_token: str) -> str:
-        """Get document processing status"""
-        try:
-            headers = {
-                "accept": "application/json",
-                "Authorization": azure_token
-            }
-            
-            params = {
-                "parent_document_id": document_id,
-                "paginate_output": "true",
-                "is_universal_document": "false",
-                "size": "50",
-            }
-            
-            url = f"{self.ingest_status_url}/{self.app_id}"
-            
-            async with httpx.AsyncClient(timeout=60, verify=False) as client:
-                response = await client.get(url, params=params, headers=headers)
-                response.raise_for_status()
-                
-                if response.status_code != 200:
-                    return "FAILED"
-                
-                items = response.json().get("items", [])
-                if len(items) == 0:
-                    return "PENDING"
-                else:
-                    return items[0].get("ingest_status", "UNKNOWN")
-                    
-        except Exception as e:
-            print(f"Status check failed: {e}")
-            return "FAILED"
-    
-    async def search_documents(
-        self,
-        query: str,
-        document_id: str,
-        azure_token: str,
-        system_prompt: str = "You are an intelligent AI assistant",
-        model_type: str = "gpt-4o-mini",
-        temperature: float = 0.1,
-        max_documents: int = 10,
-        search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH",
-        multimodal: bool = False,
-        image_detail: Literal["low", "high"] = "low"
-    ) -> Optional[Dict[str, Any]]:
-        """Search documents using RAG"""
-        
-        headers = {
-            "accept": "application/json",
-            "Authorization": azure_token
-        }
-        
-        # Generate session ID from document ID for search context
-        session_id = f"search_{document_id}_{int(time.time())}"
-        
-        json_data = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
+Extract business rules from MT700 fields and provide structured output in JSON format.
+Focus on fields 45A (Description of Goods), 46A (Documents Required), and 47A (Additional Conditions).
+Be precise and create actionable validation rules."""
+
+    if custom_prompt:
+        prompt = custom_prompt.replace("{mt700_text}", mt700_text)
+    else:
+        prompt = f"""
+        Analyze this MT700 Documentary Credit message and extract detailed business rules.
+
+        MT700 Content:
+        {mt700_text}
+
+        Tasks:
+        1. Extract all relevant DC fields (20, 31D, 32B, 40A, 44A, 44C, 45A, 46A, 47A, 50, 59)
+        2. Convert conditions from fields 45A, 46A, and 47A into specific business rules
+        3. Create actionable validation rules for document verification
+
+        Output as valid JSON:
+        {{
+            "extracted_fields": {{
+                "20": "DC reference number",
+                "31D": "expiry date",
+                "32B": "amount and currency",
+                "40A": "form of DC",
+                "44A": "port of loading", 
+                "44C": "latest date of shipment",
+                "45A": "description of goods",
+                "46A": "documents required",
+                "47A": "additional conditions",
+                "50": "applicant details",
+                "59": "beneficiary details"
+            }},
+            "business_rules": [
+                {{
+                    "rule_id": 1,
+                    "rule_text": "Clear, specific requirement statement",
+                    "document_type": "All Documents",
+                    "requirement_type": "exact_match",
+                    "field_name": "beneficiary_address",
+                    "expected_value": "specific value to check for",
+                    "validation_note": "additional context for validation"
+                }}
             ],
-            "model": model_type,
-            "encoding_model": "cl100k_base",
-            "embedding_model": "text-embedding-ada-002",
-            "temperature": temperature,
-            "vector_store_index": "lydia-embeddings-3",
-            "search_text": query,
-            "use_tools": False,
-            "max_number_of_documents": max_documents,
-            "search_universal": "false",
-            "save_response": "false",
-            "session_id": session_id,
-            "model_logprobs": 0,
-            "multimodal": multimodal,
-            "search_type": search_type,
-        }
-        
-        if multimodal:
-            json_data["image_detail"] = image_detail
-        
-        try:
-            url = f"{self.rag_service_url}/{self.app_id}"
-            
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
-                retry_count = 0
-                max_retries = 3
-                
-                while retry_count < max_retries:
-                    response = await client.post(url, headers=headers, json=json_data)
-                    
-                    if response.status_code == 429:
-                        # Rate limited, wait and retry
-                        await asyncio.sleep(2 ** retry_count)
-                        retry_count += 1
-                        continue
-                    
-                    response.raise_for_status()
-                    result = response.json()
-                    
-                    # Check if we got meaningful results
-                    document_content = result.get("document_content", "")
-                    if document_content or search_type != "SEARCH":
-                        return result
-                    
-                    # No meaningful results, retry
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        await asyncio.sleep(2)
-                
-                # Return even if no documents found
-                return result
-                
-        except Exception as e:
-            print(f"Document search failed: {e}")
-            return None
+            "dc_metadata": {{
+                "dc_number": "extracted from field 20",
+                "beneficiary": "extracted from field 59",
+                "applicant": "extracted from field 50",
+                "amount": "extracted from field 32B",
+                "expiry_date": "extracted from field 31D",
+                "latest_shipment": "extracted from field 44C"
+            }}
+        }}
+
+        Make each rule specific and actionable for document verification.
+        """
     
-    async def delete_document(self, document_id: str, azure_token: str) -> bool:
-        """Delete document from the RAG system"""
-        try:
-            headers = {
-                "accept": "application/json",
-                "Authorization": azure_token
+    try:
+        if use_rag:
+            # Use RAG to search for relevant documentation/examples
+            search_query = f"MT700 documentary credit business rules extraction {mt700_text[:200]}..."
+            search_result = await rag_client.search_documents(
+                query=search_query,
+                document_id=document_id,
+                azure_token=azure_token,
+                system_prompt=system_prompt
+            )
+            
+            if search_result:
+                response_text = search_result.get("response", "")
+            else:
+                return {"error": "RAG search failed"}
+        else:
+            # Direct query without RAG
+            search_result = await rag_client.search_documents(
+                query=prompt,
+                document_id=document_id,
+                azure_token=azure_token,
+                system_prompt=system_prompt,
+                search_type="NO-SEARCH"
+            )
+            
+            if search_result:
+                response_text = search_result.get("response", "")
+            else:
+                return {"error": "LLM query failed"}
+        
+        # Extract JSON from response
+        result = extract_json_from_response(response_text)
+        
+        if result:
+            return result
+        else:
+            return {"error": "No valid JSON found in response", "raw_response": response_text}
+            
+    except Exception as e:
+        return {"error": f"Failed to extract rules: {str(e)}"}
+
+
+async def analyze_documents_rag(
+    rag_client: SimpleRAGClient,
+    business_rules: List[Dict],
+    document_id: str,
+    azure_token: str,
+    custom_prompt: Optional[str] = None,
+    multimodal: bool = False,
+    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH"
+) -> Dict[str, Any]:
+    """Analyze documents against business rules using RAG"""
+    
+    system_prompt = """You are an expert Documentary Credit examiner specializing in trade finance compliance.
+
+Verify trade documents against specified business rules and provide detailed compliance analysis.
+Use "Passed" or "Need Review" for verification results.
+Provide specific evidence from documents and detailed reasoning."""
+
+    if custom_prompt:
+        verification_prompt = custom_prompt
+        verification_prompt = verification_prompt.replace("{business_rules}", json.dumps(business_rules, indent=2))
+    else:
+        verification_prompt = f"""
+        As a Documentary Credit examiner, verify trade documents against these business rules:
+
+        BUSINESS RULES TO CHECK:
+        {json.dumps(business_rules, indent=2)}
+
+        For each business rule:
+        1. Search the documents for relevant information
+        2. Check if the requirements are met
+        3. Provide specific evidence from the documents
+        4. Determine Pass/Fail status with detailed reasoning
+
+        Output as JSON:
+        {{
+            "verification_results": [
+                {{
+                    "rule_id": 1,
+                    "rule_text": "the business rule being checked",
+                    "verification_result": "Passed" or "Need Review",
+                    "verification_reasoning": "detailed explanation with specific evidence",
+                    "evidence_found": "exact text/data found in documents or null",
+                    "document_source": "which document(s) contained the evidence",
+                    "confidence_level": "High" or "Medium" or "Low"
+                }}
+            ],
+            "overall_compliance": "Passed" or "Need Review",
+            "discrepancies": [
+                {{
+                    "rule_id": 1,
+                    "issue_description": "clear description of the problem",
+                    "severity": "Major" or "Minor",
+                    "suggested_action": "recommendation for resolving the issue"
+                }}
+            ]
+        }}
+        """
+    
+    try:
+        # Use RAG to search documents and verify rules
+        search_result = await rag_client.search_documents(
+            query=verification_prompt,
+            document_id=document_id,
+            azure_token=azure_token,
+            system_prompt=system_prompt,
+            multimodal=multimodal,
+            search_type=search_type,
+            max_documents=15  # More documents for comprehensive analysis
+        )
+        
+        if not search_result:
+            return {"error": "Document search failed"}
+        
+        response_text = search_result.get("response", "")
+        
+        # Extract JSON from response
+        result = extract_json_from_response(response_text)
+        
+        if result:
+            # Add search metadata
+            result["search_metadata"] = {
+                "documents_searched": len(search_result.get("documents_used", [])),
+                "document_content_length": len(search_result.get("document_content", "")),
+                "multimodal_used": multimodal,
+                "search_type": search_type
             }
+            return result
+        else:
+            return {"error": "Failed to parse verification response", "raw_response": response_text}
             
-            querystring = {"parent_document_id": document_id}
-            delete_url = f"{self.document_uploader_url}/{self.app_id}"
-            
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
-                response = await client.delete(delete_url, headers=headers, params=querystring)
-                response.raise_for_status()
-                return response.status_code == 202
-                
-        except Exception as e:
-            print(f"Document deletion failed: {e}")
-            return False
+    except Exception as e:
+        return {"error": f"Failed to analyze documents: {str(e)}"}
