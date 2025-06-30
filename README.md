@@ -26,48 +26,62 @@ ADDITIONAL VERIFICATION CRITERIA:
    -Use appropriate matching method: exact, fuzzy text, numerical range, or cross-reference
    -Apply case-insensitive and format-flexible comparisons
 
-STRING MATCH PERCENTAGE CALCULATION EXAMPLES:
+COMPLIANCE_MATCH_SCORE CALCULATION METHOD:
+**CRITICAL: Always calculate compliance_match_score based on word overlap, regardless of verification_result**
 
-**Example 1: Exact Match**
-- Required: "STEVE POWER LTD. NORTH ROAD, BUSINESS PARK, SUSSEX L33 7RR UNITED KINGDOM"
-- Found: "STEVE POWER LTD. NORTH ROAD, BUSINESS PARK, SUSSEX L33 7RR UNITED KINGDOM"
-- string_match_percentage: 100.0
-- verification_result: "Matched"
+**Step-by-Step Calculation:**
+1. Extract all significant words from both expected_value and evidence_found (ignore punctuation, case)
+2. Count matching words between both texts
+3. Calculate percentage: (matching_words / total_unique_words_in_expected) × 100
+4. Apply this calculation INDEPENDENT of verification_result classification
 
-**Example 2: High Partial Match**
-- Required: "STEVE POWER LTD. NORTH ROAD, BUSINESS PARK, SUSSEX L33 7RR UNITED KINGDOM"
-- Found: "STEVE POWER LIMITED NORTH ROAD BUSINESS PARK SUSSEX L33 7RR UK"
-- string_match_percentage: 87.5 (missing "UNITED KINGDOM", "LTD" vs "LIMITED")
-- verification_result: "Partial Match (87.5%)"
+**Example 1: Beneficiary Address Partial Match**
+- Expected: "DEF CO LTD, YANDIAN INDUSTRIAL ZONE, YANZHOU, JINING, SHANDONG PROVINCE, CHINA"
+- Found: "DEF CO., LTD INDUSTRIAL ZONE, SHANGHAI, CHINA"
+- Matching words: ["DEF", "CO", "LTD", "INDUSTRIAL", "ZONE", "CHINA"] = 6 words
+- Total words in expected: ["DEF", "CO", "LTD", "YANDIAN", "INDUSTRIAL", "ZONE", "YANZHOU", "JINING", "SHANDONG", "PROVINCE", "CHINA"] = 11 words
+- compliance_match_score: (6/11) × 100 = 54.5%
+- verification_result: "Not Found" (due to wrong location: SHANGHAI vs required YANDIAN/YANZHOU/JINING/SHANDONG)
 
-**Example 3: Medium Partial Match**
-- Required: "SPARE PARTS FOR INDUSTRIAL GAS POWERED GENERATOR"
-- Found: "SPARE PARTS FOR INDUSTRIAL GENERATOR"
-- string_match_percentage: 71.4 (missing "GAS POWERED")
+**Example 2: Description Match**
+- Expected: "SPARE PARTS FOR INDUSTRIAL GAS POWERED GENERATOR"
+- Found: "SPARE PARTS FOR INDUSTRIAL GENERATOR HIGH POWER"
+- Matching words: ["SPARE", "PARTS", "FOR", "INDUSTRIAL", "GENERATOR"] = 5 words
+- Total words in expected: ["SPARE", "PARTS", "FOR", "INDUSTRIAL", "GAS", "POWERED", "GENERATOR"] = 7 words
+- compliance_match_score: (5/7) × 100 = 71.4%
 - verification_result: "Partial Match (71.4%)"
 
-**Example 4: Low Partial Match**
-- Required: "HAPAG LLOYD OR MAERSK LINE OR PILL"
-- Found: "COSCO SHIPPING"
-- string_match_percentage: 15.2 (completely different shipping line)
-- verification_result: "Not Found"
-
-**Example 5: Numerical Match**
-- Required: "8503.0000.00"
-- Found: "8503.0000.00"
-- string_match_percentage: 100.0
+**Example 3: Exact Match**
+- Expected: "STEVE POWER LTD. NORTH ROAD, BUSINESS PARK, SUSSEX L33 7RR UNITED KINGDOM"
+- Found: "STEVE POWER LTD. NORTH ROAD, BUSINESS PARK, SUSSEX L33 7RR UNITED KINGDOM"
+- compliance_match_score: 100.0%
 - verification_result: "Matched"
 
-**Example 6: Numerical Partial Match**
-- Required: "8503.0000.00"
-- Found: "8503.0000"
-- string_match_percentage: 83.3 (missing ".00" suffix)
-- verification_result: "Partial Match (83.3%)"
+**Example 4: No Match**
+- Expected: "HAPAG LLOYD OR MAERSK LINE OR PILL"
+- Found: "COSCO SHIPPING"
+- Matching words: [] = 0 words
+- compliance_match_score: 0.0%
+- verification_result: "Not Found"
 
-MATCHING THRESHOLDS:
+**Example 5: Bank Details Exact Match**
+- Expected: "Bank of Rizhao, Jining, China, SWIFT CODE: RZCBCNBDJ1"
+- Found: "Bank of Rizhao, Jining, China, SWIFT CODE: RZCBCNBDJ1"
+- compliance_match_score: 100.0%
+- verification_result: "Matched"
+
+**IMPORTANT RULES:**
+- compliance_match_score MUST be calculated for ALL rules, even "Not Found" results
+- If any matching words exist, compliance_match_score cannot be 0%
+- Only use 0% when there are absolutely no common significant words
+- Consider variations like "LTD" vs "LIMITED", "CO" vs "COMPANY" as matches
+
+VERIFICATION RESULT CLASSIFICATION THRESHOLDS:
 - 95-100%: "Matched"
 - 70-94%: "Partial Match (X%)"
 - Below 70%: "Not Found"
+
+**Note:** compliance_match_score is calculated independently and may show word overlap even for "Not Found" results when business requirements aren't met despite some text similarities.
 
 Output as JSON:
 {
@@ -80,7 +94,7 @@ Output as JSON:
             "evidence_found": "exact text/data found in documents or null if not found",
             "document_source": "which specific document(s) contained the evidence",
             "page_location": "specific page where evidence was found",
-            "string_match_percentage": 85.5,
+            "compliance_match_score": 85.5,
             "confidence_level": "High" or "Medium" or "Low"
         }
     ],
@@ -101,7 +115,7 @@ Output as JSON:
     ]
 }
 
-EXAMPLE OUTPUT WITH STRING MATCH PERCENTAGES:
+EXAMPLE OUTPUT WITH COMPLIANCE_MATCH_SCORES:
 ```json
 {
     "verification_results": [
@@ -113,7 +127,18 @@ EXAMPLE OUTPUT WITH STRING MATCH PERCENTAGES:
             "evidence_found": "STEVE POWER LIMITED NORTH ROAD BUSINESS PARK SUSSEX L33 7RR UK",
             "document_source": "Commercial Invoice",
             "page_location": "9",
-            "string_match_percentage": 87.5,
+            "compliance_match_score": 87.5,
+            "confidence_level": "High"
+        },
+        {
+            "rule_id": 2,
+            "rule_text": "Beneficiary on DC must be: DEF CO LTD, YANDIAN INDUSTRIAL ZONE, YANZHOU, JINING, SHANDONG PROVINCE, CHINA",
+            "verification_result": "Not Found",
+            "verification_reasoning": "Found similar company name but wrong location: SHANGHAI instead of required YANDIAN/YANZHOU/JINING/SHANDONG area",
+            "evidence_found": "DEF CO., LTD INDUSTRIAL ZONE, SHANGHAI, CHINA",
+            "document_source": "Commercial Invoice, Packing List",
+            "page_location": "9",
+            "compliance_match_score": 54.5,
             "confidence_level": "High"
         },
         {
@@ -124,7 +149,7 @@ EXAMPLE OUTPUT WITH STRING MATCH PERCENTAGES:
             "evidence_found": "SPARE PARTS FOR INDUSTRIAL GAS POWERED GENERATOR",
             "document_source": "Bill of Lading",
             "page_location": "12",
-            "string_match_percentage": 100.0,
+            "compliance_match_score": 100.0,
             "confidence_level": "High"
         },
         {
@@ -135,7 +160,7 @@ EXAMPLE OUTPUT WITH STRING MATCH PERCENTAGES:
             "evidence_found": null,
             "document_source": "Bill of Lading",
             "page_location": null,
-            "string_match_percentage": 0.0,
+            "compliance_match_score": 0.0,
             "confidence_level": "High"
         }
     ]
