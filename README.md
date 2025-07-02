@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 
 def process_br_accounts_output(output_json: Dict) -> Dict:
     """
@@ -59,22 +59,29 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
             print(f"❌ Unexpected accounts data type: {type(accounts_data)}")
             return output_json
         
-        # Extract tables from accounts data
-        tables = extract_tables_from_accounts(accounts_data, accounts_item)
+        # Extract tables and nested accounts structure from accounts data
+        tables, nested_accounts = extract_tables_from_accounts(accounts_data, accounts_item)
         
-        if tables:
-            print(f"✅ Created {len(tables)} tables")
+        if tables or nested_accounts:
+            print(f"✅ Created {len(tables)} tables and {len(nested_accounts)} nested account fields")
             
-            # Remove the original accounts field
+            # Update the original accounts field with nested structure
             i, j = accounts_index
-            output_json["values"][i]["kv_pairs"]["values"].pop(j)
+            output_json["values"][i]["kv_pairs"]["values"][j] = {
+                "label_name": "accounts",
+                "value": nested_accounts,
+                "source": accounts_item.get("source", "DCREST AI"),
+                "confidence_score": {"type": "integer"},
+                "bbox": {"type": "array"},
+                "exchange_token": accounts_item.get("exchange_token", "")
+            }
             
             # Add the new tables to the output
             output_json["values"].extend(tables)
             
             print("✅ BR accounts processing complete")
         else:
-            print("❌ No tables created from accounts data")
+            print("❌ No tables or nested accounts created from accounts data")
         
     except json.JSONDecodeError as e:
         print(f"❌ Failed to parse accounts JSON: {e}")
@@ -160,9 +167,9 @@ def create_table_from_list(table_name: str, data_list: List[Dict], source: str, 
         for header in headers:
             value = str(row_data.get(header, "N/A"))
             data_row.append({
-                "value": value,
-                "confidence_score": None,  # You can add confidence calculation here
-                "bbox": None
+                "value": {"type": "string"},
+                "confidenceScore": {"type": "integer"}, 
+                "bbox": {"type": "array"}
             })
         table_rows.append(data_row)
         print(f"   📝 Added row {row_idx + 1}: {[row_data.get(h, 'N/A') for h in headers]}")
@@ -170,7 +177,7 @@ def create_table_from_list(table_name: str, data_list: List[Dict], source: str, 
     # Create the table structure
     table = {
         "table": {
-            "data_title": table_name,
+            "dataTitle": table_name,
             "source": source,
             "values": table_rows,
             "confidence_score": None,
@@ -279,9 +286,17 @@ def test_br_postprocessor_with_real_data():
     print(f"Number of value items: {len(result.get('values', []))}")
     
     for i, item in enumerate(result.get('values', [])):
-        if 'table' in item:
+        if 'kv_pairs' in item:
+            kv_pairs = item['kv_pairs']['values']
+            for kv_pair in kv_pairs:
+                if kv_pair.get('label_name') == 'accounts':
+                    print(f"Accounts structure:")
+                    print(f"  Type: nested list with {len(kv_pair.get('value', []))} items")
+                    for nested_item in kv_pair.get('value', []):
+                        print(f"    {nested_item.get('label_name')}: {nested_item.get('label_value')}")
+        elif 'table' in item:
             table = item['table']
-            print(f"Table {i+1}: {table['data_title']}")
+            print(f"Table: {table['dataTitle']}")
             print(f"  Rows: {len(table['values'])}")
             if table['values']:
                 headers = [cell['value'] for cell in table['values'][0]]
