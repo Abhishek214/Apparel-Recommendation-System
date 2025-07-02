@@ -58,17 +58,17 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
             print(f"❌ Unexpected accounts data type: {type(accounts_data)}")
             return output_json
         
-        # Extract nested accounts structure from accounts data
-        nested_accounts = extract_tables_from_accounts(accounts_data, accounts_item)
+        # Extract accounts structure as list of lists
+        accounts_list = extract_accounts_as_list_of_lists(accounts_data, accounts_item)
         
-        if nested_accounts:
-            print(f"✅ Created nested accounts structure with {len(nested_accounts)} items")
+        if accounts_list:
+            print(f"✅ Created accounts list structure with {len(accounts_list)} account(s)")
             
-            # Update the original accounts field with nested structure
+            # Update the original accounts field with list of lists structure
             i, j = accounts_index
             output_json["values"][i]["kv_pairs"]["values"][j] = {
                 "label_name": "accounts",
-                "value": nested_accounts,
+                "label_value": accounts_list,  # This is now a list of lists
                 "source": accounts_item.get("source", "DCREST AI"),
                 "confidence_score": accounts_item.get("confidence_score", 95),
                 "bbox": accounts_item.get("bbox"),
@@ -77,7 +77,7 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
             
             print("✅ BR accounts processing complete")
         else:
-            print("❌ No nested accounts structure created from accounts data")
+            print("❌ No accounts structure created from accounts data")
         
     except json.JSONDecodeError as e:
         print(f"❌ Failed to parse accounts JSON: {e}")
@@ -85,10 +85,10 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
     
     return output_json
 
-def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> List[List[Dict]]:
-    """Extract nested accounts structure as list of lists - each inner list represents one account"""
+def extract_accounts_as_list_of_lists(accounts_data: List[Dict], original_accounts_item: Dict) -> List[List[Dict]]:
+    """Extract accounts structure as list of lists - each inner list contains one account's fields"""
     
-    accounts_list = []  # List of accounts, each account is a list of fields
+    accounts_list = []
     source = original_accounts_item.get("source", "DCREST AI")
     confidence_score = original_accounts_item.get("confidence_score", 95)
     exchange_token = original_accounts_item.get("exchange_token", "")
@@ -109,83 +109,89 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
         for field_name, field_value in account.items():
             print(f"   🔍 Processing field: {field_name} (type: {type(field_value)})")
             
-            # Handle simple account fields
+            # Handle simple account fields with schema format
             if field_name in ["Account Number", "Account Type"]:
                 camel_case_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
-                account_field = {
+                account_field_item = {
                     "label_name": camel_case_name,
-                    "label_value": field_value,  # Use actual value
+                    "label_value": {"type": "string"},  # Schema format for simple fields
                     "source": source,
-                    "confidence_score": confidence_score,
-                    "bbox": None,
+                    "confidence_score": {"type": "integer"},
+                    "bbox": {"type": "array"},
                     "exchange_token": exchange_token
                 }
-                account_fields.append(account_field)
-                print(f"   ✅ Added account field: {camel_case_name} = {field_value}")
+                account_fields.append(account_field_item)
+                print(f"   ✅ Added simple field: {camel_case_name}")
             
-            # Process complex fields as nested table structures
+            # Handle complex fields as table structures
             elif isinstance(field_value, list) and field_value:
-                print(f"   📊 Creating nested table for {field_name} with {len(field_value)} items")
+                print(f"   📊 Creating table structure for {field_name} with {len(field_value)} items")
                 
+                # Convert field name to camelCase
                 camel_case_table_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
                 
-                # Create nested table structure
-                account_field = {
-                    "label_name": camel_case_table_name,
-                    "value": create_nested_table_structure(field_value, field_name),
-                    "source": source,
-                    "confidence_score": confidence_score,
-                    "bbox": None,
-                    "exchange_token": exchange_token
-                }
-                account_fields.append(account_field)
-                print(f"   ✅ Added nested table: {camel_case_table_name}")
+                # Create table structure with real headers and schema data rows
+                table_structure = create_table_structure_with_schema(field_value, field_name)
+                
+                if table_structure:
+                    table_field_item = {
+                        "table": {
+                            "dataTitle": field_name,
+                            "source": source,
+                            "values": table_structure,
+                            "confidence_score": None,
+                            "bbox": None,
+                            "exchange_token": exchange_token
+                        }
+                    }
+                    account_fields.append(table_field_item)
+                    print(f"   ✅ Added table: {field_name}")
         
-        # Add this account's fields to the accounts list
-        accounts_list.append(account_fields)
-        print(f"   ✅ Account {account_idx + 1} complete with {len(account_fields)} fields")
+        if account_fields:
+            accounts_list.append(account_fields)
+            print(f"   ✅ Added account {account_idx + 1} with {len(account_fields)} fields")
     
-    print(f"🎯 Created accounts list with {len(accounts_list)} accounts")
+    print(f"✅ Created accounts list with {len(accounts_list)} account(s)")
     return accounts_list
 
-def create_nested_table_structure(data_list: List[Dict], table_name: str) -> List[List[Dict]]:
-    """Create nested table structure with actual values"""
+def create_table_structure_with_schema(data_list: List[Dict], table_name: str) -> List[List[Dict]]:
+    """Create table structure with real headers and schema type data rows"""
     
     if not data_list or not isinstance(data_list[0], dict):
-        print(f"   ❌ Invalid data for nested table {table_name}")
+        print(f"   ❌ Invalid data for table {table_name}")
         return []
     
     # Get headers from the first item
     headers = list(data_list[0].keys())
-    print(f"   📋 Nested table headers: {headers}")
+    print(f"   📋 Table headers: {headers}")
     
     # Create table rows
     table_rows = []
     
-    # Add header row
+    # Add header row with real header names
     header_row = []
     for header in headers:
         header_row.append({
-            "value": header,
+            "value": header,  # Real header name
             "confidence_score": None,
             "bbox": None
         })
     table_rows.append(header_row)
+    print(f"   📝 Added header row: {headers}")
     
-    # Add data rows with actual values
+    # Add data rows with schema types (matching your image format)
     for row_idx, row_data in enumerate(data_list):
         data_row = []
         for header in headers:
-            actual_value = str(row_data.get(header, "N/A"))
             data_row.append({
-                "value": actual_value,  # Use actual value, not schema type
-                "confidence_score": 95,  # Use actual confidence score
-                "bbox": None
+                "value": {"type": "string"},  # Schema format for data rows
+                "confidenceScore": {"type": "integer"}, 
+                "bbox": {"type": "array"}
             })
         table_rows.append(data_row)
-        print(f"   📝 Added data row {row_idx + 1}: {[row_data.get(h, 'N/A') for h in headers]}")
+        print(f"   📝 Added schema data row {row_idx + 1}")
     
-    print(f"   ✅ Created nested table with {len(table_rows)} rows")
+    print(f"   ✅ Created table structure with {len(table_rows)} rows")
     return table_rows
 
 # Usage: Add this to your extraction process AFTER getting the current output
