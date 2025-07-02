@@ -1,389 +1,316 @@
 import json
-import os
-import glob
-from datetime import datetime
-import cv2
-import numpy as np
-from typing import List, Dict, Tuple
-import argparse
+import statistics
+from typing import List, Dict, Union, Optional, Literal, Tuple
+from source.constants import EntityValue, ExtractedEntities
+from source.log_handler import logger
 
-class LabelMeToCOCOConverter:
+
+def br_json_parser(
+    json_str: str,
+    query: str,
+    response: Dict,
+    exchange: str,
+    logprobs: Optional[List[Dict[str, Union[bytes, str, float]]]] = None,
+    confidence_method: Literal[
+        "product", "average", "first", "sum", "weighted_avg"
+    ] = "product",
+) -> Tuple[List[str], List[EntityValue], List[str], List[List[List[EntityValue]]]]:
     """
-    Convert LabelMe format annotations to COCO format for EfficientDet training.
+    Custom parser for BR (Bank Resolution) documents that handles complex nested structures.
     
-    LabelMe format: One JSON file per image with polygon annotations
-    COCO format: Single JSON file with all annotations and metadata
+    Args:
+        json_str: JSON string representing the entity
+        query: The query/prompt used
+        response: The response from the RAG system
+        exchange: Exchange token
+        logprobs: Logprobs for each string token
+        confidence_method: Method for computing confidence scores
+    
+    Returns:
+        Tuple of:
+        - entity_keys: List of simple key-value pair names
+        - entity_values: List of simple key-value pair values
+        - table_names: List of table names extracted from nested structures
+        - table_arrays: List of tables (each table is a list of rows, each row is a list of EntityValues)
     """
     
-    def __init__(self):
-        self.coco_data = {
-            "info": {
-                "description": "Custom dataset for EfficientDet training",
-                "url": "",
-                "version": "1.0",
-                "year": datetime.now().year,
-                "contributor": "Custom Dataset",
-                "date_created": datetime.now().isoformat()
-            },
-            "licenses": [
-                {
-                    "id": 1,
-                    "name": "Custom License",
-                    "url": ""
-                }
-            ],
-            "images": [],
-            "annotations": [],
-            "categories": []
-        }
-        
-        # Category mapping for your classes
-        self.categories = {
-            "signature": 1,
-            "barcode": 2,
-            "chop": 3,
-            "stamp": 4
-        }
-        
-        self.image_id = 1
-        self.annotation_id = 1
-        
-        # Initialize categories in COCO format
-        for name, cat_id in self.categories.items():
-            self.coco_data["categories"].append({
-                "id": cat_id,
-                "name": name,
-                "supercategory": "object"
-            })
+    try:
+        entity_data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON in br_json_parser: {e}")
+        return [], [], [], []
     
-    def polygon_to_bbox(self, points: List[List[float]]) -> Tuple[float, float, float, float]:
-        """
-        Convert polygon points to bounding box format [x, y, width, height].
-        
-        Args:
-            points: List of [x, y] coordinates
-            
-        Returns:
-            Tuple of (x_min, y_min, width, height)
-        """
-        if not points:
-            return (0, 0, 0, 0)
-        
-        # Extract x and y coordinates
-        x_coords = [point[0] for point in points]
-        y_coords = [point[1] for point in points]
-        
-        x_min = min(x_coords)
-        y_min = min(y_coords)
-        x_max = max(x_coords)
-        y_max = max(y_coords)
-        
-        width = x_max - x_min
-        height = y_max - y_min
-        
-        return (x_min, y_min, width, height)
+    # Lists to store simple key-value pairs
+    entity_keys: List[str] = []
+    entity_values: List[EntityValue] = []
     
-    def calculate_polygon_area(self, points: List[List[float]]) -> float:
-        """
-        Calculate area of polygon using shoelace formula.
-        
-        Args:
-            points: List of [x, y] coordinates
-            
-        Returns:
-            Area of the polygon
-        """
-        if len(points) < 3:
-            return 0.0
-        
-        # Shoelace formula
-        area = 0.0
-        n = len(points)
-        
-        for i in range(n):
-            j = (i + 1) % n
-            area += points[i][0] * points[j][1]
-            area -= points[j][0] * points[i][1]
-        
-        return abs(area) / 2.0
+    # Lists to store table data
+    table_names: List[str] = []
+    table_arrays: List[List[List[EntityValue]]] = []
     
-    def get_image_dimensions(self, image_path: str) -> Tuple[int, int]:
-        """
-        Get image dimensions from file.
-        
-        Args:
-            image_path: Path to image file
-            
-        Returns:
-            Tuple of (width, height)
-        """
-        try:
-            img = cv2.imread(image_path)
-            if img is not None:
-                height, width = img.shape[:2]
-                return width, height
-            else:
-                print(f"Warning: Could not read image {image_path}")
-                return 0, 0
-        except Exception as e:
-            print(f"Error reading image {image_path}: {e}")
-            return 0, 0
+    # Track logprobs usage
+    last_used_idx = 0
     
-    def process_labelme_json(self, json_path: str, image_dir: str) -> bool:
-        """
-        Process a single LabelMe JSON file and add to COCO dataset.
+    def create_entity_value(value: str, logprobs_slice: Optional[List] = None) -> EntityValue:
+        """Helper function to create EntityValue objects"""
+        return EntityValue(
+            value=value,
+            confidence=None,
+            bbox=None,
+            context_relevance_score=None,
+            query=query,
+            answer=response.get("response", ""),
+            document_content=response.get("document_content", ""),
+            rag_similarity_maen=statistics.mean(
+                [doc["@search.score"] for doc in response.get("documents_used", [])]
+            ) if response.get("documents_used") else 0,
+            logprobs=logprobs_slice,
+            exchange=exchange,
+        )
+    
+    def extract_table_from_list(table_data: List[Dict], table_name: str) -> List[List[EntityValue]]:
+        """Extract table structure from list of dictionaries"""
+        if not table_data or not isinstance(table_data[0], dict):
+            return []
         
-        Args:
-            json_path: Path to LabelMe JSON file
-            image_dir: Directory containing images
-            
-        Returns:
-            True if processed successfully, False otherwise
-        """
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                labelme_data = json.load(f)
-            
-            # Get image information
-            image_filename = labelme_data.get('imagePath', '')
-            if not image_filename:
-                print(f"Warning: No imagePath in {json_path}")
-                return False
-            
-            # Handle relative paths
-            image_path = os.path.join(image_dir, os.path.basename(image_filename))
-            if not os.path.exists(image_path):
-                # Try looking for the image with the same base name as JSON
-                base_name = os.path.splitext(os.path.basename(json_path))[0]
-                for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']:
-                    potential_path = os.path.join(image_dir, base_name + ext)
-                    if os.path.exists(potential_path):
-                        image_path = potential_path
-                        image_filename = os.path.basename(potential_path)
-                        break
+        # Get headers from first dictionary
+        headers = list(table_data[0].keys())
+        
+        # Create table structure
+        table_rows = []
+        
+        # Add header row
+        header_row = []
+        for header in headers:
+            header_row.append(create_entity_value(header))
+        table_rows.append(header_row)
+        
+        # Add data rows
+        for row_data in table_data:
+            data_row = []
+            for header in headers:
+                value = str(row_data.get(header, "N/A"))
+                data_row.append(create_entity_value(value))
+            table_rows.append(data_row)
+        
+        return table_rows
+    
+    def process_accounts_structure(accounts_data: List[Dict]) -> None:
+        """Process the complex accounts structure and extract tables"""
+        nonlocal table_names, table_arrays
+        
+        for account in accounts_data:
+            # Handle simple account fields as key-value pairs
+            for key, value in account.items():
+                if key in ["Account Number", "Account Type"]:
+                    # Convert to camelCase
+                    camel_key = key.replace(" ", "").replace("A", "a", 1) if key.startswith("A") else key
+                    entity_keys.append(camel_key)
+                    entity_values.append(create_entity_value(str(value)))
+                
+                # Handle complex nested structures as tables
+                elif key == "Amended Information" and isinstance(value, list):
+                    table_names.append("Amended Information")
+                    table_arrays.append(extract_table_from_list(value, "Amended Information"))
+                
+                elif key == "Group wise Signing Authorities" and isinstance(value, list):
+                    table_names.append("Group wise Signing Authorities")
+                    table_arrays.append(extract_table_from_list(value, "Group wise Signing Authorities"))
+                
+                elif key == "Signing Instructions" and isinstance(value, list):
+                    # Handle signing instructions which may have mixed structure
+                    signing_instructions = []
+                    for instruction in value:
+                        if isinstance(instruction, dict):
+                            signing_instructions.append(instruction)
+                        elif isinstance(instruction, str):
+                            # Handle standalone string values
+                            signing_instructions.append({"Instruction": instruction})
+                    
+                    if signing_instructions:
+                        table_names.append("Signing Instructions")
+                        table_arrays.append(extract_table_from_list(signing_instructions, "Signing Instructions"))
+                
+                elif "Intra-group" in key and isinstance(value, (list, dict)):
+                    # Handle intra-group fund transfer instructions
+                    if isinstance(value, dict):
+                        intra_group_data = [value]
+                    else:
+                        intra_group_data = value
+                    
+                    table_names.append("Intra-group Companies Fund Transfer Instructions")
+                    table_arrays.append(extract_table_from_list(intra_group_data, "Intra-group Companies Fund Transfer Instructions"))
+    
+    # Process each key-value pair in the main JSON
+    for key, value in entity_data.items():
+        if key.lower() == "accounts" and isinstance(value, str):
+            # Parse the accounts string as JSON
+            try:
+                accounts_json = json.loads(value)
+                if isinstance(accounts_json, list):
+                    process_accounts_structure(accounts_json)
                 else:
-                    print(f"Warning: Image not found for {json_path}")
-                    return False
+                    # Handle single account object
+                    process_accounts_structure([accounts_json])
+            except json.JSONDecodeError:
+                # If can't parse as JSON, treat as regular key-value pair
+                entity_keys.append(key)
+                entity_values.append(create_entity_value(str(value)))
+        
+        elif key != "table":  # Skip table key as it's handled separately
+            # Convert key to camelCase for consistency
+            camel_key = key.replace(" ", "")
+            if camel_key and camel_key[0].isupper():
+                camel_key = camel_key[0].lower() + camel_key[1:]
             
-            # Get image dimensions
-            if 'imageHeight' in labelme_data and 'imageWidth' in labelme_data:
-                width = labelme_data['imageWidth']
-                height = labelme_data['imageHeight']
-            else:
-                width, height = self.get_image_dimensions(image_path)
-                if width == 0 or height == 0:
-                    return False
-            
-            # Add image to COCO dataset
-            image_info = {
-                "id": self.image_id,
-                "width": width,
-                "height": height,
-                "file_name": image_filename,
-                "license": 1,
-                "flickr_url": "",
-                "coco_url": "",
-                "date_captured": datetime.now().isoformat()
-            }
-            self.coco_data["images"].append(image_info)
-            
-            # Process shapes/annotations
-            shapes = labelme_data.get('shapes', [])
-            
-            for shape in shapes:
-                label = shape.get('label', '').lower()
-                
-                # Map label to category ID
-                category_id = None
-                for category_name, cat_id in self.categories.items():
-                    if category_name.lower() in label or label in category_name.lower():
-                        category_id = cat_id
-                        break
-                
-                if category_id is None:
-                    print(f"Warning: Unknown label '{label}' in {json_path}")
-                    continue
-                
-                points = shape.get('points', [])
-                if len(points) < 3:  # Need at least 3 points for a polygon
-                    print(f"Warning: Insufficient points for shape in {json_path}")
-                    continue
-                
-                # Convert polygon to bounding box
-                bbox = self.polygon_to_bbox(points)
-                area = self.calculate_polygon_area(points)
-                
-                # Flatten points for COCO segmentation format
-                segmentation = []
-                for point in points:
-                    segmentation.extend([float(point[0]), float(point[1])])
-                
-                # Create annotation
-                annotation = {
-                    "id": self.annotation_id,
-                    "image_id": self.image_id,
-                    "category_id": category_id,
-                    "segmentation": [segmentation],
-                    "area": area,
-                    "bbox": bbox,
-                    "iscrowd": 0
-                }
-                
-                self.coco_data["annotations"].append(annotation)
-                self.annotation_id += 1
-            
-            self.image_id += 1
-            return True
-            
-        except Exception as e:
-            print(f"Error processing {json_path}: {e}")
-            return False
+            entity_keys.append(camel_key)
+            entity_values.append(create_entity_value(str(value)))
     
-    def convert_dataset(self, labelme_dir: str, image_dir: str, output_path: str):
-        """
-        Convert entire dataset from LabelMe to COCO format.
-        
-        Args:
-            labelme_dir: Directory containing LabelMe JSON files
-            image_dir: Directory containing images
-            output_path: Path for output COCO JSON file
-        """
-        # Find all JSON files
-        json_files = glob.glob(os.path.join(labelme_dir, "*.json"))
-        
-        if not json_files:
-            print(f"No JSON files found in {labelme_dir}")
-            return
-        
-        print(f"Found {len(json_files)} JSON files to process")
-        
-        processed_count = 0
-        
-        for json_file in json_files:
-            print(f"Processing: {os.path.basename(json_file)}")
-            
-            if self.process_labelme_json(json_file, image_dir):
-                processed_count += 1
-            else:
-                print(f"Failed to process: {json_file}")
-        
-        print(f"\nProcessed {processed_count}/{len(json_files)} files successfully")
-        print(f"Total images: {len(self.coco_data['images'])}")
-        print(f"Total annotations: {len(self.coco_data['annotations'])}")
-        
-        # Count annotations per category
-        category_counts = {}
-        for ann in self.coco_data['annotations']:
-            cat_id = ann['category_id']
-            cat_name = next(cat['name'] for cat in self.coco_data['categories'] if cat['id'] == cat_id)
-            category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
-        
-        print("\nAnnotations per category:")
-        for cat_name, count in category_counts.items():
-            print(f"  {cat_name}: {count}")
-        
-        # Save COCO dataset
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(self.coco_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"\nCOCO dataset saved to: {output_path}")
+    return entity_keys, entity_values, table_names, table_arrays
+
+
+def br_post_extraction_processing(
+    session_token: str,
+    azure_token: str,
+    background_tasks,
+    prompt_data: Dict,
+    responses: List[Dict],
+    confidence_method: Literal[
+        "product", "average", "first", "sum", "weighted_avg"
+    ] = "product",
+) -> Tuple[ExtractedEntities, List[str]]:
+    """
+    Custom post-processing function for BR documents that uses the BR parser.
     
-    def validate_coco_dataset(self, coco_path: str):
-        """
-        Validate the generated COCO dataset.
-        
-        Args:
-            coco_path: Path to COCO JSON file
-        """
+    This function replaces the standard post_extraction_processing for BR document type.
+    """
+    from source.ragClient import exchangeToken, exchangeTok_patch
+    from source.content_moderation import (
+        non_blocking_docSearch_evaluation,
+        non_blocking_response_evaluation,
+    )
+    from source.utils import extract_json
+    
+    # Initialize result containers
+    params_keys = []
+    params_values = []
+    param_table = []
+    param_table_values = []
+    table_exchange = []
+    
+    # Process each response
+    for items, response in zip(prompt_data.values(), responses):
         try:
-            with open(coco_path, 'r', encoding='utf-8') as f:
-                coco_data = json.load(f)
+            exchange_token = exchangeToken(session_token, azure_token, items["prompt"])
+            answer = response.get("answer", "")
+            logprobs = response.get("logprobs")
             
-            # Basic validation
-            required_keys = ['images', 'annotations', 'categories']
-            for key in required_keys:
-                if key not in coco_data:
-                    print(f"Error: Missing required key '{key}' in COCO dataset")
-                    return False
+            if "?" in answer:
+                text = extract_json(answer)
+                if text:
+                    try:
+                        if items.get("table") == True:
+                            # Use standard table parser for explicit table prompts
+                            from source.utils import table_parser
+                            table_names, table_values = table_parser(
+                                table_json_str=text,
+                                logprobs=logprobs,
+                                confidence_method=confidence_method,
+                                query=items["prompt"],
+                                response=response,
+                            )
+                            param_table.extend(table_names)
+                            param_table_values.extend(table_values)
+                            table_exchange.extend([exchange_token for _ in table_names])
+                        else:
+                            # Use BR-specific parser for regular entity extraction
+                            entity_keys, entity_values, br_table_names, br_table_arrays = br_json_parser(
+                                json_str=text,
+                                query=items["prompt"],
+                                response=response,
+                                exchange=exchange_token,
+                                logprobs=logprobs,
+                                confidence_method=confidence_method,
+                            )
+                            
+                            # Add simple key-value pairs
+                            params_keys.extend(entity_keys)
+                            params_values.extend(entity_values)
+                            
+                            # Add extracted tables
+                            param_table.extend(br_table_names)
+                            param_table_values.extend(br_table_arrays)
+                            table_exchange.extend([exchange_token for _ in br_table_names])
+                            
+                    except Exception as e:
+                        logger.error(f"Error in BR JSON parsing: {e}")
+                        # Fallback to treating as simple entity
+                        params_keys.append(items["entity_name"])
+                        params_values.append(
+                            EntityValue(
+                                value=text,
+                                confidence=None,
+                                bbox=None,
+                                query=items["prompt"],
+                                answer=answer,
+                                document_content=response.get("document_content", ""),
+                                rag_similarity_maen=statistics.mean(
+                                    [doc["@search.score"] for doc in response.get("documents_used", [])]
+                                ) if response.get("documents_used") else 0,
+                                exchange=exchange_token,
+                                logprobs=logprobs,
+                            )
+                        )
+            else:
+                # Handle non-JSON responses
+                params_keys.append(items["entity_name"])
+                params_values.append(
+                    EntityValue(
+                        value=answer,
+                        confidence=None,
+                        bbox=None,
+                        query=items["prompt"],
+                        answer=answer,
+                        document_content=response.get("document_content", ""),
+                        rag_similarity_maen=statistics.mean(
+                            [doc["@search.score"] for doc in response.get("documents_used", [])]
+                        ) if response.get("documents_used") else 0,
+                        exchange=exchange_token,
+                        logprobs=logprobs,
+                    )
+                )
             
-            # Check if we have data
-            if not coco_data['images']:
-                print("Error: No images in dataset")
-                return False
-            
-            if not coco_data['annotations']:
-                print("Error: No annotations in dataset")
-                return False
-            
-            if not coco_data['categories']:
-                print("Error: No categories in dataset")
-                return False
-            
-            # Validate references
-            image_ids = set(img['id'] for img in coco_data['images'])
-            category_ids = set(cat['id'] for cat in coco_data['categories'])
-            
-            invalid_refs = 0
-            for ann in coco_data['annotations']:
-                if ann['image_id'] not in image_ids:
-                    invalid_refs += 1
-                if ann['category_id'] not in category_ids:
-                    invalid_refs += 1
-            
-            if invalid_refs > 0:
-                print(f"Warning: Found {invalid_refs} invalid references in annotations")
-            
-            print("COCO dataset validation completed successfully!")
-            return True
+            # Add background tasks
+            background_tasks.add_task(
+                exchangeTok_patch, azure_token, exchange_token, answer
+            )
+            background_tasks.add_task(
+                non_blocking_docSearch_evaluation,
+                azure_token,
+                exchange_token,
+                items["prompt"],
+                answer,
+                response.get("document_content", ""),
+            )
+            background_tasks.add_task(
+                non_blocking_response_evaluation,
+                azure_token,
+                exchange_token,
+                items["prompt"],
+                answer,
+                response.get("document_content", ""),
+            )
             
         except Exception as e:
-            print(f"Error validating COCO dataset: {e}")
-            return False
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Convert LabelMe format to COCO format for EfficientDet')
-    parser.add_argument('--labelme_dir', type=str, required=True,
-                       help='Directory containing LabelMe JSON files')
-    parser.add_argument('--image_dir', type=str, required=True,
-                       help='Directory containing images')
-    parser.add_argument('--output', type=str, required=True,
-                       help='Output path for COCO JSON file')
-    parser.add_argument('--validate', action='store_true',
-                       help='Validate the generated COCO dataset')
+            logger.error(f"Error processing BR document response: {e}")
+            continue
     
-    args = parser.parse_args()
+    # Create ExtractedEntities object
+    extracted_entities = ExtractedEntities(
+        params_keys=params_keys,
+        params_values=params_values,
+        param_table=param_table,
+        param_table_values=param_table_values,
+    )
     
-    # Check if directories exist
-    if not os.path.exists(args.labelme_dir):
-        print(f"Error: LabelMe directory does not exist: {args.labelme_dir}")
-        return
-    
-    if not os.path.exists(args.image_dir):
-        print(f"Error: Image directory does not exist: {args.image_dir}")
-        return
-    
-    # Create output directory if it doesn't exist
-    output_dir = os.path.dirname(args.output)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-    
-    # Convert dataset
-    converter = LabelMeToCOCOConverter()
-    converter.convert_dataset(args.labelme_dir, args.image_dir, args.output)
-    
-    # Validate if requested
-    if args.validate:
-        print("\nValidating generated COCO dataset...")
-        converter.validate_coco_dataset(args.output)
-
-
-if __name__ == "__main__":
-    # Example usage when run directly
-    if len(os.sys.argv) == 1:
-        print("Example usage:")
-        print("python convert_labelme_to_coco.py --labelme_dir ./annotations --image_dir ./images --output ./coco_dataset.json --validate")
-        print("\nFor your specific use case:")
-        print("python convert_labelme_to_coco.py --labelme_dir /path/to/your/json/files --image_dir /path/to/your/images --output ./efficientdet_dataset.json --validate")
-    else:
-        main()
+    return extracted_entities, table_exchange
