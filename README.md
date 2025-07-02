@@ -1,407 +1,389 @@
-#!/usr/bin/env python3
-"""
-COCO Dataset Splitting Utility
-Split COCO format dataset into train/validation sets with proper stratification
-
-Usage:
-    python split_coco_dataset.py --input dataset.json --output_dir ./data --train_ratio 0.8
-"""
-
 import json
-import argparse
-import shutil
-from pathlib import Path
-from collections import defaultdict, Counter
-import random
+import os
+import glob
+from datetime import datetime
+import cv2
 import numpy as np
+from typing import List, Dict, Tuple
+import argparse
 
-class COCODatasetSplitter:
-    """Split COCO dataset into train/validation sets with stratification"""
+class LabelMeToCOCOConverter:
+    """
+    Convert LabelMe format annotations to COCO format for EfficientDet training.
     
-    def __init__(self, input_path, output_dir, train_ratio=0.8, random_seed=42):
-        self.input_path = Path(input_path)
-        self.output_dir = Path(output_dir)
-        self.train_ratio = train_ratio
-        self.val_ratio = 1.0 - train_ratio
-        
-        # Set random seed for reproducibility
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        
-        # Create output directories
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.train_images_dir = self.output_dir / 'train_images'
-        self.val_images_dir = self.output_dir / 'val_images'
-        self.train_images_dir.mkdir(exist_ok=True)
-        self.val_images_dir.mkdir(exist_ok=True)
-        
-        # Load dataset
-        self.load_dataset()
-        
-    def load_dataset(self):
-        """Load COCO dataset from JSON file"""
-        print(f"Loading dataset from: {self.input_path}")
-        
-        with open(self.input_path, 'r', encoding='utf-8') as f:
-            self.coco_data = json.load(f)
-        
-        print(f"Dataset loaded successfully")
-        print(f"Images: {len(self.coco_data['images'])}")
-        print(f"Annotations: {len(self.coco_data['annotations'])}")
-        print(f"Categories: {len(self.coco_data['categories'])}")
-        
-        # Create mappings for easier access
-        self.image_id_to_info = {img['id']: img for img in self.coco_data['images']}
-        self.annotations_by_image = defaultdict(list)
-        
-        for ann in self.coco_data['annotations']:
-            self.annotations_by_image[ann['image_id']].append(ann)
-        
-        print(f"Images with annotations: {len(self.annotations_by_image)}")
+    LabelMe format: One JSON file per image with polygon annotations
+    COCO format: Single JSON file with all annotations and metadata
+    """
     
-    def analyze_dataset(self):
-        """Analyze dataset distribution"""
-        print("\n" + "="*50)
-        print("DATASET ANALYSIS")
-        print("="*50)
-        
-        # Category distribution
-        category_counts = Counter()
-        for ann in self.coco_data['annotations']:
-            category_counts[ann['category_id']] += 1
-        
-        # Create category name mapping
-        cat_id_to_name = {cat['id']: cat['name'] for cat in self.coco_data['categories']}
-        
-        print("\nCategory Distribution:")
-        for cat_id, count in category_counts.most_common():
-            cat_name = cat_id_to_name.get(cat_id, f"Unknown_{cat_id}")
-            percentage = (count / len(self.coco_data['annotations'])) * 100
-            print(f"  {cat_name}: {count} annotations ({percentage:.1f}%)")
-        
-        # Images per category (images that contain each category)
-        images_per_category = defaultdict(set)
-        for ann in self.coco_data['annotations']:
-            images_per_category[ann['category_id']].add(ann['image_id'])
-        
-        print("\nImages per Category:")
-        for cat_id in sorted(images_per_category.keys()):
-            cat_name = cat_id_to_name.get(cat_id, f"Unknown_{cat_id}")
-            img_count = len(images_per_category[cat_id])
-            percentage = (img_count / len(self.coco_data['images'])) * 100
-            print(f"  {cat_name}: {img_count} images ({percentage:.1f}%)")
-        
-        # Annotations per image statistics
-        anns_per_image = [len(anns) for anns in self.annotations_by_image.values()]
-        if anns_per_image:
-            print(f"\nAnnotations per Image:")
-            print(f"  Mean: {np.mean(anns_per_image):.2f}")
-            print(f"  Median: {np.median(anns_per_image):.2f}")
-            print(f"  Min: {min(anns_per_image)}")
-            print(f"  Max: {max(anns_per_image)}")
-        
-        return category_counts, images_per_category
-    
-    def stratified_split(self):
-        """Perform stratified split ensuring balanced distribution"""
-        print(f"\n" + "="*50)
-        print("PERFORMING STRATIFIED SPLIT")
-        print("="*50)
-        
-        # Get images with annotations only
-        image_ids_with_anns = list(self.annotations_by_image.keys())
-        
-        # Group images by their category combinations
-        image_category_signatures = {}
-        for img_id in image_ids_with_anns:
-            # Get unique categories in this image
-            categories = set()
-            for ann in self.annotations_by_image[img_id]:
-                categories.add(ann['category_id'])
-            
-            # Create signature (sorted tuple of category IDs)
-            signature = tuple(sorted(categories))
-            image_category_signatures[img_id] = signature
-        
-        # Group images by signature
-        signature_to_images = defaultdict(list)
-        for img_id, signature in image_category_signatures.items():
-            signature_to_images[signature].append(img_id)
-        
-        print(f"Found {len(signature_to_images)} unique category combinations:")
-        cat_id_to_name = {cat['id']: cat['name'] for cat in self.coco_data['categories']}
-        
-        for signature, img_list in signature_to_images.items():
-            cat_names = [cat_id_to_name.get(cat_id, f"Unknown_{cat_id}") for cat_id in signature]
-            print(f"  {'+'.join(cat_names)}: {len(img_list)} images")
-        
-        # Split each group proportionally
-        train_images = []
-        val_images = []
-        
-        for signature, img_list in signature_to_images.items():
-            # Shuffle the list
-            random.shuffle(img_list)
-            
-            # Calculate split point
-            n_train = int(len(img_list) * self.train_ratio)
-            
-            # Ensure at least one image in each split if possible
-            if len(img_list) >= 2:
-                n_train = max(1, min(n_train, len(img_list) - 1))
-            
-            # Split
-            train_images.extend(img_list[:n_train])
-            val_images.extend(img_list[n_train:])
-        
-        print(f"\nSplit Results:")
-        print(f"  Training images: {len(train_images)} ({len(train_images)/len(image_ids_with_anns)*100:.1f}%)")
-        print(f"  Validation images: {len(val_images)} ({len(val_images)/len(image_ids_with_anns)*100:.1f}%)")
-        
-        return train_images, val_images
-    
-    def create_split_datasets(self, train_image_ids, val_image_ids):
-        """Create separate COCO files for train and validation"""
-        print(f"\n" + "="*50)
-        print("CREATING SPLIT DATASETS")
-        print("="*50)
-        
-        # Create train dataset
-        train_data = {
-            'info': self.coco_data['info'].copy(),
-            'licenses': self.coco_data['licenses'].copy(),
-            'categories': self.coco_data['categories'].copy(),
-            'images': [],
-            'annotations': []
+    def __init__(self):
+        self.coco_data = {
+            "info": {
+                "description": "Custom dataset for EfficientDet training",
+                "url": "",
+                "version": "1.0",
+                "year": datetime.now().year,
+                "contributor": "Custom Dataset",
+                "date_created": datetime.now().isoformat()
+            },
+            "licenses": [
+                {
+                    "id": 1,
+                    "name": "Custom License",
+                    "url": ""
+                }
+            ],
+            "images": [],
+            "annotations": [],
+            "categories": []
         }
         
-        # Create val dataset
-        val_data = {
-            'info': self.coco_data['info'].copy(),
-            'licenses': self.coco_data['licenses'].copy(),
-            'categories': self.coco_data['categories'].copy(),
-            'images': [],
-            'annotations': []
+        # Category mapping for your classes
+        self.categories = {
+            "signature": 1,
+            "barcode": 2,
+            "chop": 3,
+            "stamp": 4
         }
         
-        # Add training images and annotations
-        train_ann_id = 1
-        for img_id in train_image_ids:
-            # Add image info
-            img_info = self.image_id_to_info[img_id].copy()
-            train_data['images'].append(img_info)
-            
-            # Add annotations
-            for ann in self.annotations_by_image[img_id]:
-                ann_copy = ann.copy()
-                ann_copy['id'] = train_ann_id
-                train_data['annotations'].append(ann_copy)
-                train_ann_id += 1
+        self.image_id = 1
+        self.annotation_id = 1
         
-        # Add validation images and annotations
-        val_ann_id = 1
-        for img_id in val_image_ids:
-            # Add image info
-            img_info = self.image_id_to_info[img_id].copy()
-            val_data['images'].append(img_info)
-            
-            # Add annotations
-            for ann in self.annotations_by_image[img_id]:
-                ann_copy = ann.copy()
-                ann_copy['id'] = val_ann_id
-                val_data['annotations'].append(ann_copy)
-                val_ann_id += 1
-        
-        # Save datasets
-        train_json_path = self.output_dir / 'train_coco.json'
-        val_json_path = self.output_dir / 'val_coco.json'
-        
-        with open(train_json_path, 'w', encoding='utf-8') as f:
-            json.dump(train_data, f, indent=2, ensure_ascii=False)
-        
-        with open(val_json_path, 'w', encoding='utf-8') as f:
-            json.dump(val_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"Training dataset saved: {train_json_path}")
-        print(f"Validation dataset saved: {val_json_path}")
-        
-        # Print final statistics
-        self.print_split_statistics(train_data, val_data)
-        
-        return train_data, val_data
+        # Initialize categories in COCO format
+        for name, cat_id in self.categories.items():
+            self.coco_data["categories"].append({
+                "id": cat_id,
+                "name": name,
+                "supercategory": "object"
+            })
     
-    def copy_images(self, train_image_ids, val_image_ids, source_image_dir):
-        """Copy images to train/val directories"""
-        if not source_image_dir:
-            print("No source image directory provided - skipping image copying")
+    def polygon_to_bbox(self, points: List[List[float]]) -> Tuple[float, float, float, float]:
+        """
+        Convert polygon points to bounding box format [x, y, width, height].
+        
+        Args:
+            points: List of [x, y] coordinates
+            
+        Returns:
+            Tuple of (x_min, y_min, width, height)
+        """
+        if not points:
+            return (0, 0, 0, 0)
+        
+        # Extract x and y coordinates
+        x_coords = [point[0] for point in points]
+        y_coords = [point[1] for point in points]
+        
+        x_min = min(x_coords)
+        y_min = min(y_coords)
+        x_max = max(x_coords)
+        y_max = max(y_coords)
+        
+        width = x_max - x_min
+        height = y_max - y_min
+        
+        return (x_min, y_min, width, height)
+    
+    def calculate_polygon_area(self, points: List[List[float]]) -> float:
+        """
+        Calculate area of polygon using shoelace formula.
+        
+        Args:
+            points: List of [x, y] coordinates
+            
+        Returns:
+            Area of the polygon
+        """
+        if len(points) < 3:
+            return 0.0
+        
+        # Shoelace formula
+        area = 0.0
+        n = len(points)
+        
+        for i in range(n):
+            j = (i + 1) % n
+            area += points[i][0] * points[j][1]
+            area -= points[j][0] * points[i][1]
+        
+        return abs(area) / 2.0
+    
+    def get_image_dimensions(self, image_path: str) -> Tuple[int, int]:
+        """
+        Get image dimensions from file.
+        
+        Args:
+            image_path: Path to image file
+            
+        Returns:
+            Tuple of (width, height)
+        """
+        try:
+            img = cv2.imread(image_path)
+            if img is not None:
+                height, width = img.shape[:2]
+                return width, height
+            else:
+                print(f"Warning: Could not read image {image_path}")
+                return 0, 0
+        except Exception as e:
+            print(f"Error reading image {image_path}: {e}")
+            return 0, 0
+    
+    def process_labelme_json(self, json_path: str, image_dir: str) -> bool:
+        """
+        Process a single LabelMe JSON file and add to COCO dataset.
+        
+        Args:
+            json_path: Path to LabelMe JSON file
+            image_dir: Directory containing images
+            
+        Returns:
+            True if processed successfully, False otherwise
+        """
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                labelme_data = json.load(f)
+            
+            # Get image information
+            image_filename = labelme_data.get('imagePath', '')
+            if not image_filename:
+                print(f"Warning: No imagePath in {json_path}")
+                return False
+            
+            # Handle relative paths
+            image_path = os.path.join(image_dir, os.path.basename(image_filename))
+            if not os.path.exists(image_path):
+                # Try looking for the image with the same base name as JSON
+                base_name = os.path.splitext(os.path.basename(json_path))[0]
+                for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']:
+                    potential_path = os.path.join(image_dir, base_name + ext)
+                    if os.path.exists(potential_path):
+                        image_path = potential_path
+                        image_filename = os.path.basename(potential_path)
+                        break
+                else:
+                    print(f"Warning: Image not found for {json_path}")
+                    return False
+            
+            # Get image dimensions
+            if 'imageHeight' in labelme_data and 'imageWidth' in labelme_data:
+                width = labelme_data['imageWidth']
+                height = labelme_data['imageHeight']
+            else:
+                width, height = self.get_image_dimensions(image_path)
+                if width == 0 or height == 0:
+                    return False
+            
+            # Add image to COCO dataset
+            image_info = {
+                "id": self.image_id,
+                "width": width,
+                "height": height,
+                "file_name": image_filename,
+                "license": 1,
+                "flickr_url": "",
+                "coco_url": "",
+                "date_captured": datetime.now().isoformat()
+            }
+            self.coco_data["images"].append(image_info)
+            
+            # Process shapes/annotations
+            shapes = labelme_data.get('shapes', [])
+            
+            for shape in shapes:
+                label = shape.get('label', '').lower()
+                
+                # Map label to category ID
+                category_id = None
+                for category_name, cat_id in self.categories.items():
+                    if category_name.lower() in label or label in category_name.lower():
+                        category_id = cat_id
+                        break
+                
+                if category_id is None:
+                    print(f"Warning: Unknown label '{label}' in {json_path}")
+                    continue
+                
+                points = shape.get('points', [])
+                if len(points) < 3:  # Need at least 3 points for a polygon
+                    print(f"Warning: Insufficient points for shape in {json_path}")
+                    continue
+                
+                # Convert polygon to bounding box
+                bbox = self.polygon_to_bbox(points)
+                area = self.calculate_polygon_area(points)
+                
+                # Flatten points for COCO segmentation format
+                segmentation = []
+                for point in points:
+                    segmentation.extend([float(point[0]), float(point[1])])
+                
+                # Create annotation
+                annotation = {
+                    "id": self.annotation_id,
+                    "image_id": self.image_id,
+                    "category_id": category_id,
+                    "segmentation": [segmentation],
+                    "area": area,
+                    "bbox": bbox,
+                    "iscrowd": 0
+                }
+                
+                self.coco_data["annotations"].append(annotation)
+                self.annotation_id += 1
+            
+            self.image_id += 1
+            return True
+            
+        except Exception as e:
+            print(f"Error processing {json_path}: {e}")
+            return False
+    
+    def convert_dataset(self, labelme_dir: str, image_dir: str, output_path: str):
+        """
+        Convert entire dataset from LabelMe to COCO format.
+        
+        Args:
+            labelme_dir: Directory containing LabelMe JSON files
+            image_dir: Directory containing images
+            output_path: Path for output COCO JSON file
+        """
+        # Find all JSON files
+        json_files = glob.glob(os.path.join(labelme_dir, "*.json"))
+        
+        if not json_files:
+            print(f"No JSON files found in {labelme_dir}")
             return
         
-        source_dir = Path(source_image_dir)
-        if not source_dir.exists():
-            print(f"Source image directory does not exist: {source_dir}")
-            return
+        print(f"Found {len(json_files)} JSON files to process")
         
-        print(f"\n" + "="*50)
-        print("COPYING IMAGES")
-        print("="*50)
+        processed_count = 0
         
-        # Copy training images
-        print(f"Copying {len(train_image_ids)} training images...")
-        for img_id in train_image_ids:
-            img_info = self.image_id_to_info[img_id]
-            src_path = source_dir / img_info['file_name']
-            dst_path = self.train_images_dir / img_info['file_name']
+        for json_file in json_files:
+            print(f"Processing: {os.path.basename(json_file)}")
             
-            if src_path.exists():
-                shutil.copy2(src_path, dst_path)
+            if self.process_labelme_json(json_file, image_dir):
+                processed_count += 1
             else:
-                print(f"Warning: Image not found: {src_path}")
+                print(f"Failed to process: {json_file}")
         
-        # Copy validation images
-        print(f"Copying {len(val_image_ids)} validation images...")
-        for img_id in val_image_ids:
-            img_info = self.image_id_to_info[img_id]
-            src_path = source_dir / img_info['file_name']
-            dst_path = self.val_images_dir / img_info['file_name']
-            
-            if src_path.exists():
-                shutil.copy2(src_path, dst_path)
-            else:
-                print(f"Warning: Image not found: {src_path}")
+        print(f"\nProcessed {processed_count}/{len(json_files)} files successfully")
+        print(f"Total images: {len(self.coco_data['images'])}")
+        print(f"Total annotations: {len(self.coco_data['annotations'])}")
         
-        print(f"Images copied to:")
-        print(f"  Training: {self.train_images_dir}")
-        print(f"  Validation: {self.val_images_dir}")
+        # Count annotations per category
+        category_counts = {}
+        for ann in self.coco_data['annotations']:
+            cat_id = ann['category_id']
+            cat_name = next(cat['name'] for cat in self.coco_data['categories'] if cat['id'] == cat_id)
+            category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
+        
+        print("\nAnnotations per category:")
+        for cat_name, count in category_counts.items():
+            print(f"  {cat_name}: {count}")
+        
+        # Save COCO dataset
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(self.coco_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"\nCOCO dataset saved to: {output_path}")
     
-    def print_split_statistics(self, train_data, val_data):
-        """Print detailed statistics about the split"""
-        print(f"\n" + "="*50)
-        print("SPLIT STATISTICS")
-        print("="*50)
+    def validate_coco_dataset(self, coco_path: str):
+        """
+        Validate the generated COCO dataset.
         
-        # Overall statistics
-        total_images = len(train_data['images']) + len(val_data['images'])
-        total_annotations = len(train_data['annotations']) + len(val_data['annotations'])
-        
-        print(f"Total Images: {total_images}")
-        print(f"  Training: {len(train_data['images'])} ({len(train_data['images'])/total_images*100:.1f}%)")
-        print(f"  Validation: {len(val_data['images'])} ({len(val_data['images'])/total_images*100:.1f}%)")
-        
-        print(f"\nTotal Annotations: {total_annotations}")
-        print(f"  Training: {len(train_data['annotations'])} ({len(train_data['annotations'])/total_annotations*100:.1f}%)")
-        print(f"  Validation: {len(val_data['annotations'])} ({len(val_data['annotations'])/total_annotations*100:.1f}%)")
-        
-        # Category distribution
-        cat_id_to_name = {cat['id']: cat['name'] for cat in self.coco_data['categories']}
-        
-        train_category_counts = Counter(ann['category_id'] for ann in train_data['annotations'])
-        val_category_counts = Counter(ann['category_id'] for ann in val_data['annotations'])
-        
-        print(f"\nCategory Distribution:")
-        print(f"{'Category':<15} {'Train':<8} {'Val':<8} {'Train%':<8} {'Val%':<8}")
-        print("-" * 55)
-        
-        for cat_id in sorted(cat_id_to_name.keys()):
-            cat_name = cat_id_to_name[cat_id]
-            train_count = train_category_counts.get(cat_id, 0)
-            val_count = val_category_counts.get(cat_id, 0)
-            total_cat = train_count + val_count
+        Args:
+            coco_path: Path to COCO JSON file
+        """
+        try:
+            with open(coco_path, 'r', encoding='utf-8') as f:
+                coco_data = json.load(f)
             
-            if total_cat > 0:
-                train_pct = train_count / total_cat * 100
-                val_pct = val_count / total_cat * 100
-                print(f"{cat_name:<15} {train_count:<8} {val_count:<8} {train_pct:<8.1f} {val_pct:<8.1f}")
-    
-    def split_dataset(self, source_image_dir=None):
-        """Main method to split the dataset"""
-        # Analyze original dataset
-        self.analyze_dataset()
-        
-        # Perform stratified split
-        train_image_ids, val_image_ids = self.stratified_split()
-        
-        # Create split datasets
-        train_data, val_data = self.create_split_datasets(train_image_ids, val_image_ids)
-        
-        # Copy images if source directory provided
-        if source_image_dir:
-            self.copy_images(train_image_ids, val_image_ids, source_image_dir)
-        
-        print(f"\n" + "="*50)
-        print("DATASET SPLIT COMPLETED SUCCESSFULLY!")
-        print("="*50)
-        
-        print(f"\nOutput files:")
-        print(f"  Training annotations: {self.output_dir / 'train_coco.json'}")
-        print(f"  Validation annotations: {self.output_dir / 'val_coco.json'}")
-        if source_image_dir:
-            print(f"  Training images: {self.train_images_dir}")
-            print(f"  Validation images: {self.val_images_dir}")
-        
-        print(f"\nUse these paths in your EfficientDet config:")
-        print(f"data:")
-        print(f"  train_annotations: '{self.output_dir / 'train_coco.json'}'")
-        print(f"  val_annotations: '{self.output_dir / 'val_coco.json'}'")
-        if source_image_dir:
-            print(f"  train_images: '{self.train_images_dir}'")
-            print(f"  val_images: '{self.val_images_dir}'")
+            # Basic validation
+            required_keys = ['images', 'annotations', 'categories']
+            for key in required_keys:
+                if key not in coco_data:
+                    print(f"Error: Missing required key '{key}' in COCO dataset")
+                    return False
+            
+            # Check if we have data
+            if not coco_data['images']:
+                print("Error: No images in dataset")
+                return False
+            
+            if not coco_data['annotations']:
+                print("Error: No annotations in dataset")
+                return False
+            
+            if not coco_data['categories']:
+                print("Error: No categories in dataset")
+                return False
+            
+            # Validate references
+            image_ids = set(img['id'] for img in coco_data['images'])
+            category_ids = set(cat['id'] for cat in coco_data['categories'])
+            
+            invalid_refs = 0
+            for ann in coco_data['annotations']:
+                if ann['image_id'] not in image_ids:
+                    invalid_refs += 1
+                if ann['category_id'] not in category_ids:
+                    invalid_refs += 1
+            
+            if invalid_refs > 0:
+                print(f"Warning: Found {invalid_refs} invalid references in annotations")
+            
+            print("COCO dataset validation completed successfully!")
+            return True
+            
+        except Exception as e:
+            print(f"Error validating COCO dataset: {e}")
+            return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Split COCO dataset into train/validation sets')
-    parser.add_argument('--input', type=str, required=True,
-                       help='Path to input COCO JSON file')
-    parser.add_argument('--output_dir', type=str, required=True,
-                       help='Output directory for split datasets')
-    parser.add_argument('--train_ratio', type=float, default=0.8,
-                       help='Ratio of training data (default: 0.8)')
-    parser.add_argument('--source_images', type=str,
-                       help='Source directory containing images (optional - for copying images to split directories)')
-    parser.add_argument('--random_seed', type=int, default=42,
-                       help='Random seed for reproducible splits (default: 42)')
-    parser.add_argument('--min_val_samples', type=int, default=1,
-                       help='Minimum samples per category in validation set (default: 1)')
+    parser = argparse.ArgumentParser(description='Convert LabelMe format to COCO format for EfficientDet')
+    parser.add_argument('--labelme_dir', type=str, required=True,
+                       help='Directory containing LabelMe JSON files')
+    parser.add_argument('--image_dir', type=str, required=True,
+                       help='Directory containing images')
+    parser.add_argument('--output', type=str, required=True,
+                       help='Output path for COCO JSON file')
+    parser.add_argument('--validate', action='store_true',
+                       help='Validate the generated COCO dataset')
     
     args = parser.parse_args()
     
-    # Validate arguments
-    if not (0.1 <= args.train_ratio <= 0.9):
-        print("Error: train_ratio must be between 0.1 and 0.9")
+    # Check if directories exist
+    if not os.path.exists(args.labelme_dir):
+        print(f"Error: LabelMe directory does not exist: {args.labelme_dir}")
         return
     
-    if not Path(args.input).exists():
-        print(f"Error: Input file does not exist: {args.input}")
+    if not os.path.exists(args.image_dir):
+        print(f"Error: Image directory does not exist: {args.image_dir}")
         return
     
-    if args.source_images and not Path(args.source_images).exists():
-        print(f"Error: Source images directory does not exist: {args.source_images}")
-        return
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(args.output)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     
-    # Create splitter and split dataset
-    splitter = COCODatasetSplitter(
-        input_path=args.input,
-        output_dir=args.output_dir,
-        train_ratio=args.train_ratio,
-        random_seed=args.random_seed
-    )
+    # Convert dataset
+    converter = LabelMeToCOCOConverter()
+    converter.convert_dataset(args.labelme_dir, args.image_dir, args.output)
     
-    splitter.split_dataset(source_image_dir=args.source_images)
+    # Validate if requested
+    if args.validate:
+        print("\nValidating generated COCO dataset...")
+        converter.validate_coco_dataset(args.output)
 
 
 if __name__ == "__main__":
     # Example usage when run directly
     if len(os.sys.argv) == 1:
-        print("COCO Dataset Splitter")
-        print("====================")
-        print("\nExample usage:")
-        print("python split_coco_dataset.py --input dataset.json --output_dir ./data --train_ratio 0.8")
-        print("\nWith image copying:")
-        print("python split_coco_dataset.py --input dataset.json --output_dir ./data --train_ratio 0.8 --source_images ./images")
-        print("\nArguments:")
-        print("  --input: Path to COCO JSON file")
-        print("  --output_dir: Directory to create train/val splits")
-        print("  --train_ratio: Fraction for training (0.1-0.9, default: 0.8)")
-        print("  --source_images: Source image directory (optional)")
-        print("  --random_seed: Random seed for reproducibility (default: 42)")
+        print("Example usage:")
+        print("python convert_labelme_to_coco.py --labelme_dir ./annotations --image_dir ./images --output ./coco_dataset.json --validate")
+        print("\nFor your specific use case:")
+        print("python convert_labelme_to_coco.py --labelme_dir /path/to/your/json/files --image_dir /path/to/your/images --output ./efficientdet_dataset.json --validate")
     else:
         main()
