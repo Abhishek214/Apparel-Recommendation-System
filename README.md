@@ -4,14 +4,57 @@ from source.br_parser import br_json_parser
 
 def test_br_parser():
     # Sample JSON that should come from LLM for BR documents
-    sample_br_json = '''
-    {
+    sample_br_json = {
         "Meeting Date": "2024-01-15",
         "Company Name in English": "Test Company Ltd",
         "Company Name in Chinese": "测试公司",
-        "accounts": "[{\\"Account Number\\": \\"All Accounts\\", \\"Account Type\\": \\"Current Accounts and Savings Accounts\\", \\"Amended Information\\": [{\\"Name\\": \\"John Doe\\", \\"Position\\": \\"Director\\", \\"Effective Date\\": \\"2024-01-01\\", \\"Group\\": \\"Group A\\", \\"Action\\": \\"add\\", \\"Remarks\\": \\"N/A\\", \\"Government ID Number\\": \\"ID123456\\"}], \\"Group wise Signing Authorities\\": [{\\"Name\\": \\"John Doe\\", \\"Group\\": \\"Group A\\"}], \\"Signing Instructions\\": [{\\"Required_signatories\\": \\"1 from Group A\\", \\"Amount_threshold_Instruction\\": \\"HKD >= 20K\\"}]}]"
+        "accounts": [
+            {
+                "Account Number": "All Accounts",
+                "Account Type": "Current Accounts and Savings Accounts",
+                "Amended Information": [
+                    {
+                        "Name": "John Doe",
+                        "Position": "Director",
+                        "Effective Date": "2024-01-01",
+                        "Group": "Group A",
+                        "Action": "add",
+                        "Remarks": "N/A",
+                        "Government ID Number": "ID123456"
+                    },
+                    {
+                        "Name": "Jane Smith",
+                        "Position": "Authorized Person",
+                        "Effective Date": "2024-01-01",
+                        "Group": "Group B",
+                        "Action": "add",
+                        "Remarks": "N/A",
+                        "Government ID Number": "ID789012"
+                    }
+                ],
+                "Group wise Signing Authorities": [
+                    {
+                        "Name": "John Doe",
+                        "Group": "Group A"
+                    },
+                    {
+                        "Name": "Jane Smith",
+                        "Group": "Group B"
+                    }
+                ],
+                "Signing Instructions": [
+                    {
+                        "Required_signatories": "1 from Group A and 1 from Group B",
+                        "Amount_threshold_Instruction": "HKD >= 20K",
+                        "Currency": "HKD"
+                    }
+                ]
+            }
+        ]
     }
-    '''
+    
+    # Convert to JSON string for testing
+    sample_br_json_str = json.dumps(sample_br_json)
     
     # Mock response object
     mock_response = {
@@ -22,7 +65,7 @@ def test_br_parser():
     
     try:
         entity_keys, entity_values, table_names, table_arrays = br_json_parser(
-            json_str=sample_br_json,
+            json_str=sample_br_json_str,
             query="Extract account information",
             response=mock_response,
             exchange="test-exchange-token"
