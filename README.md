@@ -1,10 +1,9 @@
 import json
-import re
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List
 
 def process_br_accounts_output(output_json: Dict) -> Dict:
     """
-    Post-process the existing BR output to convert accounts string into separate tables.
+    Post-process the existing BR output to convert accounts string into nested structure.
     This works with your current output format.
     """
     
@@ -59,11 +58,11 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
             print(f"❌ Unexpected accounts data type: {type(accounts_data)}")
             return output_json
         
-        # Extract tables and nested accounts structure from accounts data
-        tables, nested_accounts = extract_tables_from_accounts(accounts_data, accounts_item)
+        # Extract nested accounts structure from accounts data
+        nested_accounts = extract_tables_from_accounts(accounts_data, accounts_item)
         
-        if tables or nested_accounts:
-            print(f"✅ Created {len(tables)} tables and {len(nested_accounts)} nested account fields")
+        if nested_accounts:
+            print(f"✅ Created nested accounts structure with {len(nested_accounts)} items")
             
             # Update the original accounts field with nested structure
             i, j = accounts_index
@@ -71,17 +70,14 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
                 "label_name": "accounts",
                 "value": nested_accounts,
                 "source": accounts_item.get("source", "DCREST AI"),
-                "confidence_score": {"type": "integer"},
-                "bbox": {"type": "array"},
+                "confidence_score": accounts_item.get("confidence_score", 95),
+                "bbox": accounts_item.get("bbox"),
                 "exchange_token": accounts_item.get("exchange_token", "")
             }
             
-            # Add the new tables to the output
-            output_json["values"].extend(tables)
-            
             print("✅ BR accounts processing complete")
         else:
-            print("❌ No tables or nested accounts created from accounts data")
+            print("❌ No nested accounts structure created from accounts data")
         
     except json.JSONDecodeError as e:
         print(f"❌ Failed to parse accounts JSON: {e}")
@@ -89,15 +85,15 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
     
     return output_json
 
-def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> List[Dict]:
-    """Extract nested accounts structure including simple fields and table structures"""
+def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> List[List[Dict]]:
+    """Extract nested accounts structure as list of lists - each inner list represents one account"""
     
-    nested_accounts = []
+    accounts_list = []  # List of accounts, each account is a list of fields
     source = original_accounts_item.get("source", "DCREST AI")
     confidence_score = original_accounts_item.get("confidence_score", 95)
     exchange_token = original_accounts_item.get("exchange_token", "")
     
-    print(f"🔍 Processing {len(accounts_data)} account(s) for nested structure")
+    print(f"🔍 Processing {len(accounts_data)} account(s) for list of lists structure")
     
     for account_idx, account in enumerate(accounts_data):
         print(f"📋 Processing account {account_idx + 1}")
@@ -106,32 +102,35 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
         if not isinstance(account, dict):
             continue
         
+        # Create a list for this account's fields
+        account_fields = []
+        
         # Process each field in the account
         for field_name, field_value in account.items():
             print(f"   🔍 Processing field: {field_name} (type: {type(field_value)})")
             
-            # Handle simple account fields as nested structure under accounts
+            # Handle simple account fields
             if field_name in ["Account Number", "Account Type"]:
                 camel_case_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
-                nested_account_item = {
+                account_field = {
                     "label_name": camel_case_name,
                     "label_value": field_value,  # Use actual value
                     "source": source,
-                    "confidence_score": confidence_score,  # Use actual confidence score
-                    "bbox": None,  # Use actual bbox value
+                    "confidence_score": confidence_score,
+                    "bbox": None,
                     "exchange_token": exchange_token
                 }
-                nested_accounts.append(nested_account_item)
-                print(f"   ✅ Added nested account field: {camel_case_name} = {field_value}")
+                account_fields.append(account_field)
+                print(f"   ✅ Added account field: {camel_case_name} = {field_value}")
             
-            # Process complex fields as nested table structures within accounts
+            # Process complex fields as nested table structures
             elif isinstance(field_value, list) and field_value:
                 print(f"   📊 Creating nested table for {field_name} with {len(field_value)} items")
                 
                 camel_case_table_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
                 
-                # Create nested table structure within accounts
-                nested_table_item = {
+                # Create nested table structure
+                account_field = {
                     "label_name": camel_case_table_name,
                     "value": create_nested_table_structure(field_value, field_name),
                     "source": source,
@@ -139,10 +138,15 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
                     "bbox": None,
                     "exchange_token": exchange_token
                 }
-                nested_accounts.append(nested_table_item)
+                account_fields.append(account_field)
                 print(f"   ✅ Added nested table: {camel_case_table_name}")
+        
+        # Add this account's fields to the accounts list
+        accounts_list.append(account_fields)
+        print(f"   ✅ Account {account_idx + 1} complete with {len(account_fields)} fields")
     
-    return nested_accounts
+    print(f"🎯 Created accounts list with {len(accounts_list)} accounts")
+    return accounts_list
 
 def create_nested_table_structure(data_list: List[Dict], table_name: str) -> List[List[Dict]]:
     """Create nested table structure with actual values"""
@@ -184,58 +188,6 @@ def create_nested_table_structure(data_list: List[Dict], table_name: str) -> Lis
     print(f"   ✅ Created nested table with {len(table_rows)} rows")
     return table_rows
 
-def create_table_from_list(table_name: str, data_list: List[Dict], source: str, exchange_token: str) -> Dict:
-    """Create a table structure from a list of dictionaries"""
-    
-    if not data_list or not isinstance(data_list[0], dict):
-        print(f"   ❌ Invalid data for table {table_name}")
-        return None
-    
-    # Get headers from the first item
-    headers = list(data_list[0].keys())
-    print(f"   📋 Table headers: {headers}")
-    
-    # Create table rows
-    table_rows = []
-    
-    # Add header row
-    header_row = []
-    for header in headers:
-        header_row.append({
-            "value": header,
-            "confidence_score": None,
-            "bbox": None
-        })
-    table_rows.append(header_row)
-    
-    # Add data rows
-    for row_idx, row_data in enumerate(data_list):
-        data_row = []
-        for header in headers:
-            value = str(row_data.get(header, "N/A"))
-            data_row.append({
-                "value": {"type": "string"},
-                "confidenceScore": {"type": "integer"}, 
-                "bbox": {"type": "array"}
-            })
-        table_rows.append(data_row)
-        print(f"   📝 Added row {row_idx + 1}: {[row_data.get(h, 'N/A') for h in headers]}")
-    
-    # Create the table structure
-    table = {
-        "table": {
-            "dataTitle": table_name,
-            "source": source,
-            "values": table_rows,
-            "confidence_score": None,
-            "bbox": None,
-            "exchange_token": exchange_token
-        }
-    }
-    
-    print(f"   ✅ Created table '{table_name}' with {len(table_rows)} rows")
-    return table
-
 # Usage: Add this to your extraction process AFTER getting the current output
 
 def apply_br_post_processing(output_json: Dict, doc_type: str) -> Dict:
@@ -247,48 +199,6 @@ def apply_br_post_processing(output_json: Dict, doc_type: str) -> Dict:
     else:
         print(f"ℹ️  Skipping BR post-processing for doc_type: {doc_type}")
         return output_json
-
-# Integration example for your extraction_client.py:
-
-def updated_get_extraction_with_br_postprocessing(
-    doc_type,
-    session,
-    azure_token,
-    imageBlobID,
-    prompt_store,
-    background_tasks,
-    confidence: bool = True,
-    confidence_method: Literal[
-        "product", "average", "first", "sum", "weighted_avg"
-    ] = "product",
-    multimodal: bool = False,
-    image_detail: Literal["low", "high"] = "low",
-    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH",
-):
-    """Updated extraction function that applies BR post-processing"""
-    
-    try:
-        # ... your existing extraction logic ...
-        
-        # Get the standard output (what you're currently getting)
-        json_output = extract_output(
-            extracted_entities,
-            table_exchange=table_exchanges[0],
-            vector=session,
-            source="DCREST AI",
-            Title=File_Name,
-        )
-        
-        # Apply BR post-processing if it's a BR document
-        if doc_type.upper() == "BR":
-            print(f"🎯 Applying BR post-processing for {doc_type}")
-            json_output = process_br_accounts_output(json_output)
-        
-        return json_output
-        
-    except Exception as e:
-        logger.exception(e)
-        return None
 
 # Quick test function to test with your existing output:
 
@@ -340,14 +250,13 @@ def test_br_postprocessor_with_real_data():
                     print(f"Accounts structure:")
                     print(f"  Type: nested list with {len(kv_pair.get('value', []))} items")
                     for nested_item in kv_pair.get('value', []):
-                        print(f"    {nested_item.get('label_name')}: {nested_item.get('label_value')}")
-        elif 'table' in item:
-            table = item['table']
-            print(f"Table: {table['dataTitle']}")
-            print(f"  Rows: {len(table['values'])}")
-            if table['values']:
-                headers = [cell['value'] for cell in table['values'][0]]
-                print(f"  Headers: {headers}")
+                        if 'label_value' in nested_item:
+                            print(f"    {nested_item.get('label_name')}: {nested_item.get('label_value')}")
+                        elif 'value' in nested_item and isinstance(nested_item['value'], list):
+                            print(f"    {nested_item.get('label_name')}: table with {len(nested_item['value'])} rows")
+                            if nested_item['value']:
+                                headers = [cell['value'] for cell in nested_item['value'][0]]
+                                print(f"      Headers: {headers}")
 
 if __name__ == "__main__":
     test_br_postprocessor_with_real_data()
