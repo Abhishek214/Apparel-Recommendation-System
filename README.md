@@ -82,10 +82,11 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
     
     return output_json
 
-def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> List[Dict]:
-    """Extract table structures from accounts data"""
+def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> tuple[List[Dict], List[Dict]]:
+    """Extract table structures and nested accounts structure from accounts data"""
     
     tables = []
+    nested_accounts = []
     source = original_accounts_item.get("source", "DCREST AI")
     exchange_token = original_accounts_item.get("exchange_token", "")
     
@@ -102,12 +103,22 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
         for field_name, field_value in account.items():
             print(f"   🔍 Processing field: {field_name} (type: {type(field_value)})")
             
-            # Skip simple fields (these would be handled as key-value pairs)
+            # Handle simple account fields as nested structure under accounts
             if field_name in ["Account Number", "Account Type"]:
-                continue
+                camel_case_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
+                nested_account_item = {
+                    "label_name": camel_case_name,
+                    "label_value": {"type": "string"},
+                    "source": source,
+                    "confidence_score": {"type": "integer"},
+                    "bbox": {"type": "array"},
+                    "exchange_token": exchange_token
+                }
+                nested_accounts.append(nested_account_item)
+                print(f"   ✅ Added nested account field: {camel_case_name}")
             
             # Process complex fields as tables
-            if isinstance(field_value, list) and field_value:
+            elif isinstance(field_value, list) and field_value:
                 print(f"   📊 Creating table for {field_name} with {len(field_value)} items")
                 
                 table = create_table_from_list(field_name, field_value, source, exchange_token)
@@ -117,7 +128,7 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
                 else:
                     print(f"   ❌ Failed to create table: {field_name}")
     
-    return tables
+    return tables, nested_accounts
 
 def create_table_from_list(table_name: str, data_list: List[Dict], source: str, exchange_token: str) -> Dict:
     """Create a table structure from a list of dictionaries"""
