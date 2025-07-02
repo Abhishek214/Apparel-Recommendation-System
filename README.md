@@ -1,268 +1,268 @@
-import json
-import statistics
-from typing import List, Dict, Union, Optional, Literal, Tuple
-from source.constants import EntityValue, ExtractedEntities
+from configurations.params import DOC_TAGGING
+from source.conf_scores import CONFIDENCE_SCORE_TOOLS
+from source.conf_scores.confidence_score import (
+    ConfidenceScoreResponseConsistency,
+    compute_confidence_score,
+)
+from source.conf_scores.logprobs import LogProbs
+from source.content_moderation import (
+    non_blocking_docSearch_evaluation,
+    non_blocking_que_moderation,
+    non_blocking_response_evaluation,
+)
 from source.log_handler import logger
+from source.ragClient import ask_rag, exchangeTok_patch, exchangeToken
+from source.utils import (
+    EntityValue,
+    ExtractedEntities,
+    extract_json,
+    extract_output,
+    json_parser,
+    table_parser,
+)
+# Import the new BR parser
+from source.br_parser import br_post_extraction_processing
+
+################################
+
+headers = {"accept": "application/json", "Content-Type": "multipart/form-data"}
 
 
-def br_json_parser(
-    json_str: str,
-    query: str,
-    response: Dict,
-    exchange: str,
-    logprobs: Optional[List[Dict[str, Union[bytes, str, float]]]] = None,
-    confidence_method: Literal[
-        "product", "average", "first", "sum", "weighted_avg"
-    ] = "product",
-) -> Tuple[List[str], List[EntityValue], List[str], List[List[List[EntityValue]]]]:
-    """
-    Custom parser for BR (Bank Resolution) documents that handles complex nested structures.
-    
-    Args:
-        json_str: JSON string representing the entity
-        query: The query/prompt used
-        response: The response from the RAG system
-        exchange: Exchange token
-        logprobs: Logprobs for each string token
-        confidence_method: Method for computing confidence scores
-    
-    Returns:
-        Tuple of:
-        - entity_keys: List of simple key-value pair names
-        - entity_values: List of simple key-value pair values
-        - table_names: List of table names extracted from nested structures
-        - table_arrays: List of tables (each table is a list of rows, each row is a list of EntityValues)
-    """
-    
+def classify_document(document, url=DOC_TAGGING, headers=headers):
     try:
-        entity_data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON in br_json_parser: {e}")
-        return [], [], [], []
-    
-    # Lists to store simple key-value pairs
-    entity_keys: List[str] = []
-    entity_values: List[EntityValue] = []
-    
-    # Lists to store table data
-    table_names: List[str] = []
-    table_arrays: List[List[List[EntityValue]]] = []
-    
-    # Track logprobs usage
-    last_used_idx = 0
-    
-    def create_entity_value(value: str, logprobs_slice: Optional[List] = None) -> EntityValue:
-        """Helper function to create EntityValue objects"""
-        return EntityValue(
-            value=value,
-            confidence=None,
-            bbox=None,
-            context_relevance_score=None,
-            query=query,
-            answer=response.get("response", ""),
-            document_content=response.get("document_content", ""),
-            rag_similarity_maen=statistics.mean(
-                [doc["@search.score"] for doc in response.get("documents_used", [])]
-            ) if response.get("documents_used") else 0,
-            logprobs=logprobs_slice,
-            exchange=exchange,
-        )
-    
-    def extract_table_from_list(table_data: List[Dict], table_name: str) -> List[List[EntityValue]]:
-        """Extract table structure from list of dictionaries"""
-        if not table_data or not isinstance(table_data[0], dict):
-            return []
-        
-        # Get headers from first dictionary
-        headers = list(table_data[0].keys())
-        
-        # Create table structure
-        table_rows = []
-        
-        # Add header row
-        header_row = []
-        for header in headers:
-            header_row.append(create_entity_value(header))
-        table_rows.append(header_row)
-        
-        # Add data rows
-        for row_data in table_data:
-            data_row = []
-            for header in headers:
-                value = str(row_data.get(header, "N/A"))
-                data_row.append(create_entity_value(value))
-            table_rows.append(data_row)
-        
-        return table_rows
-    
-    def process_accounts_structure(accounts_data: List[Dict]) -> None:
-        """Process the complex accounts structure and extract tables"""
-        nonlocal table_names, table_arrays
-        
-        for account in accounts_data:
-            # Handle simple account fields as key-value pairs
-            for key, value in account.items():
-                if key in ["Account Number", "Account Type"]:
-                    # Convert to camelCase
-                    camel_key = key.replace(" ", "").replace("A", "a", 1) if key.startswith("A") else key
-                    entity_keys.append(camel_key)
-                    entity_values.append(create_entity_value(str(value)))
-                
-                # Handle complex nested structures as tables
-                elif key == "Amended Information" and isinstance(value, list):
-                    table_names.append("Amended Information")
-                    table_arrays.append(extract_table_from_list(value, "Amended Information"))
-                
-                elif key == "Group wise Signing Authorities" and isinstance(value, list):
-                    table_names.append("Group wise Signing Authorities")
-                    table_arrays.append(extract_table_from_list(value, "Group wise Signing Authorities"))
-                
-                elif key == "Signing Instructions" and isinstance(value, list):
-                    # Handle signing instructions which may have mixed structure
-                    signing_instructions = []
-                    for instruction in value:
-                        if isinstance(instruction, dict):
-                            signing_instructions.append(instruction)
-                        elif isinstance(instruction, str):
-                            # Handle standalone string values
-                            signing_instructions.append({"Instruction": instruction})
-                    
-                    if signing_instructions:
-                        table_names.append("Signing Instructions")
-                        table_arrays.append(extract_table_from_list(signing_instructions, "Signing Instructions"))
-                
-                elif "Intra-group" in key and isinstance(value, (list, dict)):
-                    # Handle intra-group fund transfer instructions
-                    if isinstance(value, dict):
-                        intra_group_data = [value]
-                    else:
-                        intra_group_data = value
-                    
-                    table_names.append("Intra-group Companies Fund Transfer Instructions")
-                    table_arrays.append(extract_table_from_list(intra_group_data, "Intra-group Companies Fund Transfer Instructions"))
-    
-    # Process each key-value pair in the main JSON
-    for key, value in entity_data.items():
-        if key.lower() == "accounts" and isinstance(value, str):
-            # Parse the accounts string as JSON
-            try:
-                accounts_json = json.loads(value)
-                if isinstance(accounts_json, list):
-                    process_accounts_structure(accounts_json)
-                else:
-                    # Handle single account object
-                    process_accounts_structure([accounts_json])
-            except json.JSONDecodeError:
-                # If can't parse as JSON, treat as regular key-value pair
-                entity_keys.append(key)
-                entity_values.append(create_entity_value(str(value)))
-        
-        elif key != "table":  # Skip table key as it's handled separately
-            # Convert key to camelCase for consistency
-            camel_key = key.replace(" ", "")
-            if camel_key and camel_key[0].isupper():
-                camel_key = camel_key[0].lower() + camel_key[1:]
-            
-            entity_keys.append(camel_key)
-            entity_values.append(create_entity_value(str(value)))
-    
-    return entity_keys, entity_values, table_names, table_arrays
+        print("requesting doc tag")
+        data = {"file": open(document, "rb")}
+        response = requests.post(url, files=data, verify=False)
+        print("doc tag response", response)
+        if response.status_code == 201:
+            response = response.json()
+            doc_tag = response["doctype"]
+            time_taken = response["time_taken"]
+            print("file name", document, "doc tag", doc_tag, "time taken", time_taken)
+            # TODO: log doc tag response in db or in log
+            return response
+        else:
+            return {"message": "error in document tagging"}
+    except Exception as e:
+        logger.exception(e)
+        return None
 
 
-def br_post_extraction_processing(
-    session_token: str,
-    azure_token: str,
+async def get_extraction(
+    doc_type,
+    session,
+    azure_token,
+    imageBlobID,
+    prompt_store,
     background_tasks,
-    prompt_data: Dict,
-    responses: List[Dict],
+    confidence: bool = True,
     confidence_method: Literal[
         "product", "average", "first", "sum", "weighted_avg"
     ] = "product",
-) -> Tuple[ExtractedEntities, List[str]]:
+    multimodal: bool = False,
+    image_detail: Literal["low", "high"] = "low",
+    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH",
+):
+    try:
+        repeate_requests = 1
+        for mth in CONFIDENCE_SCORE_TOOLS.methods:
+            if isinstance(mth, ConfidenceScoreResponseConsistency):
+                repeate_requests = mth.number_of_repeates
+                break
+        assert (
+            repeate_requests > 0
+        ), f"There should be at least 1 request requested. Found {repeate_requests}"
+
+        prompts_dict, File_Name = getPrompts(doc_type, prompt_store)
+        task = []
+        for _ in range(repeate_requests):
+            task.append(
+                run_batch_prompts(
+                    prompt_data=prompts_dict,
+                    session_id=session,
+                    azure_token=azure_token,
+                    imageBlobID=imageBlobID,
+                    background_tasks=background_tasks,
+                    confidence=confidence,
+                    confidence_method=confidence_method,
+                    multimodal=multimodal,
+                    image_detail=image_detail,
+                    search_type=search_type,
+                    doc_type=doc_type,  # Pass doc_type to determine parser
+                )
+            )
+
+        responses = await asyncio.gather(*task)
+        answers, table_exchanges = [], []
+        for resp in responses:
+            answers.append(resp[0])
+            table_exchanges.append(resp[1])
+
+        extracted_entities = await compute_confidence_score(
+            extracted_entities=answers,
+            computation_tools=CONFIDENCE_SCORE_TOOLS,
+            azure_token=azure_token,
+        )
+
+        json_output = extract_output(
+            extracted_entities,
+            table_exchange=table_exchanges[0],
+            vector=session,
+            source="DCREST AI",
+            Title=File_Name,
+        )
+        return json_output
+    except Exception as e:
+        logger.exception(e)
+        return None
+
+
+async def run_batch_prompts(
+    prompt_data,
+    session_id,
+    azure_token,
+    imageBlobID,
+    background_tasks,
+    confidence: bool = True,
+    confidence_method: Literal[
+        "product", "average", "first", "sum", "weighted_avg"
+    ] = "product",
+    multimodal: bool = False,
+    image_detail: Literal["low", "high"] = "low",
+    search_type: Literal["SEARCH", "NO-SEARCH", "IMAGE"] = "SEARCH",
+    doc_type: str = "",  # Add doc_type parameter
+    postprocessing_fn: Callable[
+        [
+            Dict[str, Union[str, bool]],
+            List[Dict[str, Union[str, List[Dict[str, Union[bytes, str, float]]]]]],
+            Literal["product", "average", "first", "sum", "weighted_avg"],
+        ],
+        Union[ExtractedEntities, Any],
+    ] = None,  # Make postprocessing_fn optional
+) -> Union[ExtractedEntities, Any]:
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            task = []
+            for keys, items in prompt_data.items():
+
+                if "system_prompt" in list(items.keys()):
+                    system_prompt = items["system_prompt"]
+                else:
+                    system_prompt = "you are an intelligent AI assistant"
+
+                task.append(
+                    ask_rag(
+                        client=client,
+                        session=session_id,
+                        azure_token=azure_token,
+                        question=items["prompt"],
+                        search_text=None,
+                        system_prompt=system_prompt,
+                        imageBlobID=imageBlobID,
+                        model_type=items["model_type"],
+                        temperature=items["temperature"],
+                        logprobs=int(confidence),
+                        multimodal=multimodal,
+                        image_detail=image_detail,
+                        search_type=search_type,
+                    )
+                )
+
+            answers = await asyncio.gather(*task)
+
+        # Determine which post-processing function to use based on doc_type
+        if doc_type.upper() == "BR":
+            # Use BR-specific parser
+            processing_fn = br_post_extraction_processing
+        else:
+            # Use standard parser
+            processing_fn = postprocessing_fn or post_extraction_processing
+        
+        return processing_fn(
+            session_token=session_id,
+            azure_token=azure_token,
+            background_tasks=background_tasks,
+            prompt_data=prompt_data,
+            responses=answers,
+            confidence_method=confidence_method,
+        )
+    except Exception as e:
+        logger.exception(e)
+        return None
+
+
+def post_extraction_processing(
+    session_token,
+    azure_token,
+    background_tasks,
+    prompt_data,
+    responses,
+    confidence_method,
+):
     """
-    Custom post-processing function for BR documents that uses the BR parser.
-    
-    This function replaces the standard post_extraction_processing for BR document type.
+    Standard post-processing function for non-BR documents.
+    This is the existing implementation.
     """
-    from source.ragClient import exchangeToken, exchangeTok_patch
-    from source.content_moderation import (
-        non_blocking_docSearch_evaluation,
-        non_blocking_response_evaluation,
-    )
-    from source.utils import extract_json
-    
-    # Initialize result containers
     params_keys = []
     params_values = []
     param_table = []
     param_table_values = []
     table_exchange = []
     
-    # Process each response
     for items, response in zip(prompt_data.values(), responses):
-        try:
-            exchange_token = exchangeToken(session_token, azure_token, items["prompt"])
-            answer = response.get("answer", "")
-            logprobs = response.get("logprobs")
-            
-            if "?" in answer:
-                text = extract_json(answer)
-                if text:
-                    try:
-                        if items.get("table") == True:
-                            # Use standard table parser for explicit table prompts
-                            from source.utils import table_parser
-                            table_names, table_values = table_parser(
-                                table_json_str=text,
-                                logprobs=logprobs,
-                                confidence_method=confidence_method,
-                                query=items["prompt"],
-                                response=response,
-                            )
-                            param_table.extend(table_names)
-                            param_table_values.extend(table_values)
-                            table_exchange.extend([exchange_token for _ in table_names])
-                        else:
-                            # Use BR-specific parser for regular entity extraction
-                            entity_keys, entity_values, br_table_names, br_table_arrays = br_json_parser(
-                                json_str=text,
-                                query=items["prompt"],
-                                response=response,
-                                exchange=exchange_token,
-                                logprobs=logprobs,
-                                confidence_method=confidence_method,
-                            )
-                            
-                            # Add simple key-value pairs
-                            params_keys.extend(entity_keys)
-                            params_values.extend(entity_values)
-                            
-                            # Add extracted tables
-                            param_table.extend(br_table_names)
-                            param_table_values.extend(br_table_arrays)
-                            table_exchange.extend([exchange_token for _ in br_table_names])
-                            
-                    except Exception as e:
-                        logger.error(f"Error in BR JSON parsing: {e}")
-                        # Fallback to treating as simple entity
-                        params_keys.append(items["entity_name"])
-                        params_values.append(
-                            EntityValue(
-                                value=text,
-                                confidence=None,
-                                bbox=None,
-                                query=items["prompt"],
-                                answer=answer,
-                                document_content=response.get("document_content", ""),
-                                rag_similarity_maen=statistics.mean(
-                                    [doc["@search.score"] for doc in response.get("documents_used", [])]
-                                ) if response.get("documents_used") else 0,
-                                exchange=exchange_token,
-                                logprobs=logprobs,
-                            )
-                        )
-            else:
-                # Handle non-JSON responses
+        exchange_token = exchangeToken(session_token, azure_token, items["prompt"])
+        answer = response["answer"]
+        logprobs = response["logprobs"] if "logprobs" in response else None
+        
+        if "?" in answer:
+            text = extract_json(answer)
+            try:
+                if items["table"] == True:
+                    # print("----------------inside table parser------------------------")
+                    table_names, table_values = table_parser(
+                        table_json_str=text,
+                        logprobs=logprobs,
+                        confidence_method=confidence_method,
+                        query=items["prompt"],
+                        response=response,
+                    )
+                    param_table.extend(table_names)
+                    param_table_values.extend(table_values)
+                    table_exchange.extend([exchange_token for _ in table_names])
+                
+                else:
+                    # print("extract json output --->", text)
+                    entity_keys, entity_values = json_parser(
+                        text,
+                        logprobs=logprobs,
+                        confidence_method=confidence_method,
+                        query=items["prompt"],
+                        response=response,
+                        exchange=exchange_token,
+                    )
+                    params_keys.extend(entity_keys)
+                    params_values.extend(entity_values)
+            except Exception as e:
+                params_keys.append(items["entity_name"])
+                logger.error(f"error in loading json: {e}")
+                params_values.append(
+                    EntityValue(
+                        value=text,
+                        confidence=None,
+                        bbox=None,
+                        query=items["prompt"],
+                        answer=answer,
+                        document_content=response["document_content"],
+                        rag_similarity_maen=statistics.mean(
+                            [doc["@search.score"] for doc in response["documents_used"]]
+                        ),
+                        exchange=exchange_token,
+                        logprobs=logprobs,
+                    )
+                )
+        else:
+            if logprobs is None:
                 params_keys.append(items["entity_name"])
                 params_values.append(
                     EntityValue(
@@ -271,46 +271,68 @@ def br_post_extraction_processing(
                         bbox=None,
                         query=items["prompt"],
                         answer=answer,
-                        document_content=response.get("document_content", ""),
+                        document_content=response["document_content"],
                         rag_similarity_maen=statistics.mean(
-                            [doc["@search.score"] for doc in response.get("documents_used", [])]
-                        ) if response.get("documents_used") else 0,
+                            [doc["@search.score"] for doc in response["documents_used"]]
+                        ),
                         exchange=exchange_token,
-                        logprobs=logprobs,
                     )
                 )
-            
-            # Add background tasks
-            background_tasks.add_task(
-                exchangeTok_patch, azure_token, exchange_token, answer
+            else:
+                continue
+        
+        try:
+            compute_logprob = LogProbs()
+            values_dict = {
+                items["entity_name"]: EntityValue(
+                    value=answer,
+                    confidence=None,
+                    bbox=None,
+                    query=items["prompt"],
+                    answer=answer,
+                    document_content=response["document_content"],
+                    rag_similarity_maen=statistics.mean(
+                        [doc["@search.score"] for doc in response["documents_used"]]
+                    ),
+                    exchange=exchange_token,
+                    logprobs=logprobs,
+                )
+            }
+            values_dict = compute_logprob.compute_joint_logprobs(
+                model_answer_dict=values_dict,
+                logprobs=logprobs,
+                method=confidence_method,
             )
-            background_tasks.add_task(
-                non_blocking_docSearch_evaluation,
-                azure_token,
-                exchange_token,
-                items["prompt"],
-                answer,
-                response.get("document_content", ""),
-            )
-            background_tasks.add_task(
-                non_blocking_response_evaluation,
-                azure_token,
-                exchange_token,
-                items["prompt"],
-                answer,
-                response.get("document_content", ""),
-            )
-            
+            params_keys.append(list(values_dict.keys())[0])
+            params_values.append(list(values_dict.values())[0])
         except Exception as e:
-            logger.error(f"Error processing BR document response: {e}")
-            continue
-    
-    # Create ExtractedEntities object
+            logger.error(f"Error in computing logprobs for string response: {e}")
+
+        background_tasks.add_task(
+            exchangeTok_patch, azure_token, exchange_token, answer
+        )
+        # background_tasks.add_task(non_blocking_que_moderation, azure_token, exchange_token)
+        background_tasks.add_task(
+            non_blocking_docSearch_evaluation,
+            azure_token,
+            exchange_token,
+            items["prompt"],
+            answer,
+            response["document_content"],
+        )
+        background_tasks.add_task(
+            non_blocking_response_evaluation,
+            azure_token,
+            exchange_token,
+            items["prompt"],
+            answer,
+            response["document_content"],
+        )
+
     extracted_entities = ExtractedEntities(
         params_keys=params_keys,
         params_values=params_values,
         param_table=param_table,
         param_table_values=param_table_values,
     )
-    
     return extracted_entities, table_exchange
