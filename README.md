@@ -89,15 +89,15 @@ def process_br_accounts_output(output_json: Dict) -> Dict:
     
     return output_json
 
-def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> tuple[List[Dict], List[Dict]]:
-    """Extract table structures and nested accounts structure from accounts data"""
+def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_item: Dict) -> List[Dict]:
+    """Extract nested accounts structure including simple fields and table structures"""
     
-    tables = []
     nested_accounts = []
     source = original_accounts_item.get("source", "DCREST AI")
+    confidence_score = original_accounts_item.get("confidence_score", 95)
     exchange_token = original_accounts_item.get("exchange_token", "")
     
-    print(f"🔍 Processing {len(accounts_data)} account(s) for table extraction")
+    print(f"🔍 Processing {len(accounts_data)} account(s) for nested structure")
     
     for account_idx, account in enumerate(accounts_data):
         print(f"📋 Processing account {account_idx + 1}")
@@ -115,27 +115,74 @@ def extract_tables_from_accounts(accounts_data: List[Dict], original_accounts_it
                 camel_case_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
                 nested_account_item = {
                     "label_name": camel_case_name,
-                    "label_value": {"type": "string"},
+                    "label_value": field_value,  # Use actual value
                     "source": source,
-                    "confidence_score": {"type": "integer"},
-                    "bbox": {"type": "array"},
+                    "confidence_score": confidence_score,  # Use actual confidence score
+                    "bbox": None,  # Use actual bbox value
                     "exchange_token": exchange_token
                 }
                 nested_accounts.append(nested_account_item)
-                print(f"   ✅ Added nested account field: {camel_case_name}")
+                print(f"   ✅ Added nested account field: {camel_case_name} = {field_value}")
             
-            # Process complex fields as tables
+            # Process complex fields as nested table structures within accounts
             elif isinstance(field_value, list) and field_value:
-                print(f"   📊 Creating table for {field_name} with {len(field_value)} items")
+                print(f"   📊 Creating nested table for {field_name} with {len(field_value)} items")
                 
-                table = create_table_from_list(field_name, field_value, source, exchange_token)
-                if table:
-                    tables.append(table)
-                    print(f"   ✅ Table created: {field_name}")
-                else:
-                    print(f"   ❌ Failed to create table: {field_name}")
+                camel_case_table_name = field_name.replace(" ", "").replace("A", "a", 1) if field_name.startswith("A") else field_name.replace(" ", "")
+                
+                # Create nested table structure within accounts
+                nested_table_item = {
+                    "label_name": camel_case_table_name,
+                    "value": create_nested_table_structure(field_value, field_name),
+                    "source": source,
+                    "confidence_score": confidence_score,
+                    "bbox": None,
+                    "exchange_token": exchange_token
+                }
+                nested_accounts.append(nested_table_item)
+                print(f"   ✅ Added nested table: {camel_case_table_name}")
     
-    return tables, nested_accounts
+    return nested_accounts
+
+def create_nested_table_structure(data_list: List[Dict], table_name: str) -> List[List[Dict]]:
+    """Create nested table structure with actual values"""
+    
+    if not data_list or not isinstance(data_list[0], dict):
+        print(f"   ❌ Invalid data for nested table {table_name}")
+        return []
+    
+    # Get headers from the first item
+    headers = list(data_list[0].keys())
+    print(f"   📋 Nested table headers: {headers}")
+    
+    # Create table rows
+    table_rows = []
+    
+    # Add header row
+    header_row = []
+    for header in headers:
+        header_row.append({
+            "value": header,
+            "confidence_score": None,
+            "bbox": None
+        })
+    table_rows.append(header_row)
+    
+    # Add data rows with actual values
+    for row_idx, row_data in enumerate(data_list):
+        data_row = []
+        for header in headers:
+            actual_value = str(row_data.get(header, "N/A"))
+            data_row.append({
+                "value": actual_value,  # Use actual value, not schema type
+                "confidence_score": 95,  # Use actual confidence score
+                "bbox": None
+            })
+        table_rows.append(data_row)
+        print(f"   📝 Added data row {row_idx + 1}: {[row_data.get(h, 'N/A') for h in headers]}")
+    
+    print(f"   ✅ Created nested table with {len(table_rows)} rows")
+    return table_rows
 
 def create_table_from_list(table_name: str, data_list: List[Dict], source: str, exchange_token: str) -> Dict:
     """Create a table structure from a list of dictionaries"""
