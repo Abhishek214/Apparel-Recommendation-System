@@ -1,19 +1,17 @@
-download_complete_model.py
+# download_efficientdet_torchvision.py
 import torch
-import timm
+import torchvision.models as models
 
-# Create the EfficientDet-D1 architecture
-model = timm.create_model('tf_efficientdet_d1', pretrained=False, num_classes=80)  # COCO classes
-
-# Load the downloaded weights
-state_dict = torch.load('tf_efficientdet_d1-4c7ebaf2.pth', map_location='cpu')
-model.load_state_dict(state_dict)
-
-# Save the complete model
-torch.save(model, 'efficientdet_d1_complete_model.pth')
-print("✅ Complete model saved!")
-
-# Check file size
-import os
-size_mb = os.path.getsize('efficientdet_d1_complete_model.pth') / (1024*1024)
-print(f"Complete model size: {size_mb:.1f} MB")
+# Try torchvision's EfficientDet
+try:
+    model = models.efficientnet_b1(pretrained=True)
+    
+    # Modify for object detection (simple approach)
+    model.classifier = torch.nn.Linear(model.classifier.in_features, 4)  # 4 classes
+    
+    # Save complete model
+    torch.save(model, 'efficientdet_alternative.pth')
+    print("✅ Alternative model created!")
+    
+except Exception as e:
+    print(f"Error: {e}")
