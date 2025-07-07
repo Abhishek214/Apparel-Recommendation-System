@@ -13,7 +13,7 @@ For each of the 17 defined attributes below, extract ALL relevant information fo
 
 ### Step 3: Multiple Reference Documentation  
 For each extracted attribute, provide:
-- **Summary**: A detailed, comprehensive summary covering all key findings, variations, and important aspects for this attribute (minimum 2-3 sentences, more for complex attributes)
+- **Summary**: A detailed, comprehensive summary covering all key findings, variations, and nuances for this attribute (minimum 2-3 sentences, more for complex attributes)
 - **Supporting References**: ALL relevant direct quotes from the document with exact page numbers and context
 - **Key Details**: Specific extracted details in structured format
 
@@ -26,7 +26,7 @@ Extract all information about contract duration, effective dates, renewal provis
 Extract the formal document name, agreement type, and any alternative titles or defined terms for the agreement.
 
 ### 3. Access to Records
-Extract all provisions about record access rights, reporting obligations, record maintenance duties, information sharing permissions, and data usage rights.
+Extract ALL provisions related to records throughout the document, including: (a) access rights to investment records, ledgers, and books by administrators, custodians, or partnerships; (b) periodic and special reporting obligations to general partners or other parties; (c) record maintenance and preservation requirements; (d) ownership of records and property rights; (e) information sharing permissions and authorizations; (f) compliance-related record requirements; (g) prompt delivery or surrender of records upon request; (h) statistical information provision obligations.
 
 ### 4. Client Name
 Extract all entity names that are clients, including primary partnerships/funds, subsidiary entities, general partners, and any entities listed in annexes or schedules.
@@ -35,7 +35,7 @@ Extract all entity names that are clients, including primary partnerships/funds,
 Extract the full legal name and details of the investment management company or advisor entity.
 
 ### 6. Notices
-Extract all notice requirements, delivery methods, addresses, communication protocols, and procedures for providing notices between parties.
+Extract ALL notice-related provisions throughout the document, including: (a) requirements for written notices; (b) delivery methods (mail, delivery, electronic); (c) address specifications for notices; (d) who notices must be given to; (e) timing requirements for notices; (f) format requirements for notices; (g) acknowledgment or receipt requirements; (h) address change notification procedures; (i) deemed delivery provisions; (j) any specific notice requirements for different types of actions (termination, changes, etc.).
 
 ### 7. Indemnity
 Extract all indemnification clauses, protection provisions, and circumstances where one party agrees to protect another from liabilities.
@@ -53,7 +53,7 @@ Extract dates when the agreement was signed, executed, or formally completed by 
 Extract confidentiality provisions, information protection clauses, non-disclosure obligations, and restrictions on information sharing.
 
 ### 12. Representations (Company)
-Extract all representations and warranties made by the client/partnership about their authority, legal status, compliance, and ability to enter into the agreement.
+Extract ALL representations and warranties made by the client/partnership throughout the document, including: (a) authority and power to execute the agreement; (b) legal capacity and corporate authority; (c) compliance with applicable laws and regulations; (d) non-violation of existing agreements or governing documents; (e) eligible contract participant status or similar regulatory qualifications; (f) accuracy of information provided; (g) financial condition representations; (h) authorization for transactions contemplated; (i) binding nature of obligations; (j) regulatory status confirmations; (k) absence of conflicts or legal impediments.
 
 ### 13. Scope of Authorization
 Extract all provisions granting discretionary authority, investment powers, decision-making rights, and specific authorizations to the investment manager.
