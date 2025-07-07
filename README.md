@@ -13,7 +13,7 @@ For each of the 17 defined attributes below, extract ALL relevant information fo
 
 ### Step 3: Multiple Reference Documentation  
 For each extracted attribute, provide:
-- **Summary**: A comprehensive summary of all key findings for this attribute
+- **Summary**: A detailed, comprehensive summary covering all key findings, variations, and important aspects for this attribute (minimum 2-3 sentences, more for complex attributes)
 - **Supporting References**: ALL relevant direct quotes from the document with exact page numbers and context
 - **Key Details**: Specific extracted details in structured format
 
