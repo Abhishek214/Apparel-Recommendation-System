@@ -1,32 +1,32 @@
-    anchors = []
+# Convert coordinates back to original image space
+for box, score in zip(nms_boxes, nms_scores):
+    # Remove padding and scale back
+    x1 = (box[0] - metadata['pad_x']) / metadata['scale']
+    y1 = (box[1] - metadata['pad_y']) / metadata['scale']
+    x2 = (box[2] - metadata['pad_x']) / metadata['scale']
+    y2 = (box[3] - metadata['pad_y']) / metadata['scale']
     
-    for level in pyramid_levels:
-        feature_size = input_size // (2 ** level)
-        
-        # Calculate stride for this level
-        stride = 2 ** level
-        
-        for y in range(feature_size):
-            for x in range(feature_size):
-                # Center coordinates in original image space
-                cx = (x + 0.5) * stride
-                cy = (y + 0.5) * stride
-                
-                for ratio_w, ratio_h in anchor_ratios:
-                    for scale in anchor_scales:
-                        # Calculate anchor size
-                        anchor_size = anchor_scale * scale * stride
-                        w = anchor_size * ratio_w
-                        h = anchor_size * ratio_h
-                        
-                        # Convert to normalized coordinates [0, 1]
-                        x1 = (cx - w/2) / input_size
-                        y1 = (cy - h/2) / input_size
-                        x2 = (cx + w/2) / input_size
-                        y2 = (cy + h/2) / input_size
-                        
-                        anchors.append([x1, y1, x2, y2])
+    # Ensure x1 < x2 and y1 < y2
+    x1, x2 = min(x1, x2), max(x1, x2)
+    y1, y2 = min(y1, y2), max(y1, y2)
     
-    anchors = np.array(anchors, dtype=np.float32)
-    print(f"Generated {len(anchors)} anchors")  # Debug print
-    return anchors
+    # Clip to image bounds
+    x1 = max(0, min(x1, metadata['original_width']))
+    y1 = max(0, min(y1, metadata['original_height']))
+    x2 = max(0, min(x2, metadata['original_width']))
+    y2 = max(0, min(y2, metadata['original_height']))
+    
+    # Skip invalid boxes
+    if x2 <= x1 or y2 <= y1:
+        continue
+    
+    detections.append({
+        'class': class_name,
+        'bbox': [float(x1), float(y1), float(x2), float(y2)],
+        'score': float(score)
+    })🎯 Fix the Return Format:# In the DetectImage function, fix the bbox format:
+Items.append({
+    'class': detection['class'],
+    'bbox': [y1, x2, x1, y2],  # Fixed: was [y1, x2, x1, x2]
+    'score': str(round(detection['score'] * 100, 2))
+})
