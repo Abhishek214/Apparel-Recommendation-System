@@ -1,0 +1,232 @@
+from typing import List, Dict
+from fastapi import Query
+
+@app.get("/sessions")
+async def get_sessions(
+    user_id: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    limit: int = Query(100, le=500),
+    offset: int = Query(0)
+):
+    """Retrieve user session details with optional filters"""
+    try:
+        filters = {
+            'user_id': user_id,
+            'session_id': session_id,
+            'start_date': start_date,
+            'end_date': end_date,
+            'limit': limit,
+            'offset': offset
+        }
+        
+        sessions = get_user_sessions(filters)
+        
+        if sessions is not None:
+            return {
+                "status": "success",
+                "count": len(sessions),
+                "data": sessions
+            }
+        else:
+            return {"status": "error", "message": "Failed to retrieve sessions"}
+            
+    except Exception as error:
+        logger.error(f"Error retrieving sessions: {error}")
+        return {"status": "error", "message": str(error)}
+
+
+@app.get("/documents")
+async def get_documents(
+    session_id: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    document_type: Optional[str] = Query(None),
+    classified_by: Optional[str] = Query(None),
+    upload_mode: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    limit: int = Query(100, le=500),
+    offset: int = Query(0)
+):
+    """Retrieve document statistics with optional filters"""
+    try:
+        filters = {
+            'session_id': session_id,
+            'user_id': user_id,
+            'document_type': document_type,
+            'classified_by': classified_by,
+            'upload_mode': upload_mode,
+            'start_date': start_date,
+            'end_date': end_date,
+            'limit': limit,
+            'offset': offset
+        }
+        
+        documents = get_document_stats(filters)
+        
+        if documents is not None:
+            return {
+                "status": "success",
+                "count": len(documents),
+                "data": documents
+            }
+        else:
+            return {"status": "error", "message": "Failed to retrieve documents"}
+            
+    except Exception as error:
+        logger.error(f"Error retrieving documents: {error}")
+        return {"status": "error", "message": str(error)}
+
+
+@app.get("/sessions/{session_id}/documents")
+async def get_session_documents(session_id: str):
+    """Retrieve all documents for a specific session"""
+    try:
+        filters = {'session_id': session_id}
+        documents = get_document_stats(filters)
+        
+        if documents is not None:
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "count": len(documents),
+                "data": documents
+            }
+        else:
+            return {"status": "error", "message": "Failed to retrieve documents"}
+            
+    except Exception as error:
+        logger.error(f"Error retrieving session documents: {error}")
+        return {"status": "error", "message": str(error)}
+
+
+
+
+
+
+from util.db_handler import (write_to_db, write_to_user_stat, write_user_session_data, 
+                             update_filebased_data, update_usermodified_data,
+                             get_user_sessions, get_document_stats)
+
+
+
+
+
+
+
+def get_user_sessions(filters):
+    """Retrieve user session details with filters"""
+    global conn
+    for count in range(1, 4):
+        try:
+            cur = conn.cursor()
+            
+            query = "SELECT session_id, user_id, session_start_time, user_name, department FROM edoct.user_session_details WHERE 1=1"
+            params = []
+            
+            if filters.get('session_id'):
+                query += " AND session_id = %s"
+                params.append(filters['session_id'])
+            
+            if filters.get('user_id'):
+                query += " AND user_id = %s"
+                params.append(filters['user_id'])
+            
+            if filters.get('start_date'):
+                query += " AND session_start_time >= %s"
+                params.append(filters['start_date'])
+            
+            if filters.get('end_date'):
+                query += " AND session_start_time <= %s"
+                params.append(filters['end_date'])
+            
+            query += " ORDER BY session_start_time DESC LIMIT %s OFFSET %s"
+            params.extend([filters.get('limit', 100), filters.get('offset', 0)])
+            
+            cur.execute(query, tuple(params))
+            columns = [desc[0] for desc in cur.description]
+            results = cur.fetchall()
+            
+            sessions = [dict(zip(columns, row)) for row in results]
+            
+            cur.close()
+            logger.info(f"Retrieved {len(sessions)} sessions")
+            return sessions
+            
+        except Exception as e:
+            logger.exception(f"db read operation unsuccessful; retry count: {count}")
+            time.sleep(1)
+            conn = get_connection()
+    else:
+        logger.critical("db connection failure, cannot read sessions")
+    return None
+
+
+def get_document_stats(filters):
+    """Retrieve document statistics with filters"""
+    global conn
+    for count in range(1, 4):
+        try:
+            cur = conn.cursor()
+            
+            query = """SELECT session_id, upload_mode, document_file_name, document_type, 
+                       doc_tag_res, classification_start_time, classification_end_time, 
+                       is_discarded, document_upload_time, prediction_score, classified_by, 
+                       correlation_id 
+                       FROM edoct.user_uploaded_document_details WHERE 1=1"""
+            params = []
+            
+            if filters.get('session_id'):
+                query += " AND session_id = %s"
+                params.append(filters['session_id'])
+            
+            if filters.get('user_id'):
+                # Join with session table for user_id filtering
+                query = query.replace("WHERE 1=1", 
+                    """INNER JOIN edoct.user_session_details USING (session_id) WHERE 1=1 
+                    AND user_id = %s""")
+                params.insert(0, filters['user_id'])
+            
+            if filters.get('document_type'):
+                query += " AND document_type = %s"
+                params.append(filters['document_type'])
+            
+            if filters.get('classified_by'):
+                query += " AND classified_by = %s"
+                params.append(filters['classified_by'])
+            
+            if filters.get('upload_mode'):
+                query += " AND upload_mode = %s"
+                params.append(filters['upload_mode'])
+            
+            if filters.get('start_date'):
+                query += " AND document_upload_time >= %s"
+                params.append(filters['start_date'])
+            
+            if filters.get('end_date'):
+                query += " AND document_upload_time <= %s"
+                params.append(filters['end_date'])
+            
+            query += " ORDER BY document_upload_time DESC LIMIT %s OFFSET %s"
+            params.extend([filters.get('limit', 100), filters.get('offset', 0)])
+            
+            cur.execute(query, tuple(params))
+            columns = [desc[0] for desc in cur.description]
+            results = cur.fetchall()
+            
+            documents = [dict(zip(columns, row)) for row in results]
+            
+            cur.close()
+            logger.info(f"Retrieved {len(documents)} documents")
+            return documents
+            
+        except Exception as e:
+            logger.exception(f"db read operation unsuccessful; retry count: {count}")
+            time.sleep(1)
+            conn = get_connection()
+    else:
+        logger.critical("db connection failure, cannot read documents")
+    return None
+
+
