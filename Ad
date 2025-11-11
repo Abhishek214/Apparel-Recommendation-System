@@ -1,4 +1,61 @@
-from typing import List, Dict
+def extract_persons_with_control(data_list):
+    """
+    Extract person names from 'Persons with significant control' section.
+    Each person entry is followed by a dictionary with 'active' or 'ceased' status.
+    """
+    # Step 1: Find start and end indices
+    start_idx = None
+    end_idx = None
+    
+    # Find the start index (contains "Persons with significant control")
+    for i, item in enumerate(data_list):
+        if 'text' in item and 'persons with significant control' in item['text'].lower():
+            start_idx = i
+            break
+    
+    # Find the end index (contains just "persons" as standalone text)
+    if start_idx is not None:
+        for i in range(start_idx + 1, len(data_list)):
+            if 'text' in data_list[i] and data_list[i]['text'].lower().strip() == 'persons':
+                end_idx = i
+                break
+    
+    if start_idx is None or end_idx is None:
+        return []
+    
+    # Step 2: Slice the list between start and end
+    sliced_list = data_list[start_idx:end_idx + 1]
+    
+    # Step 3: Extract person names
+    persons = []
+    for i in range(len(sliced_list) - 1):
+        current_dict = sliced_list[i]
+        next_dict = sliced_list[i + 1]
+        
+        # Check if current dict has text and next dict contains "active" or "ceased"
+        if 'text' in current_dict and 'text' in next_dict:
+            next_text = next_dict['text'].lower()
+            if 'active' in next_text or 'ceased' in next_text:
+                person_name = current_dict['text']
+                status = next_dict['text']
+                persons.append({
+                    'name': person_name,
+                    'status': status,
+                    'index': start_idx + i
+                })
+    
+    return persons
+
+# Usage example:
+result = extract_persons_with_control(data_list)
+for person in result:
+    print(f"Name: {person['name']}, Status: {person['status']}, Index: {person['index']}")
+
+
+
+
+
+.from typing import List, Dict
 from fastapi import Query
 
 @app.get("/sessions")
